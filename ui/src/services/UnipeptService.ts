@@ -51,9 +51,10 @@ export class UnipeptService {
     taxaIds: number[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<{ valid: number[]; invalid: number[] }> {
+  ): Promise<{ valid: number[]; invalid: number[]; names: Record<number, string> }> {
     const valid: number[] = []
     const invalid: number[] = []
+    const names: Record<number, string> = {}
     const chunks = chunked(taxaIds, this.config.batchSize)
 
     for (const [i, chunk] of chunks.entries()) {
@@ -64,6 +65,7 @@ export class UnipeptService {
       )
       const data: TaxonEntry[] = await res.json()
       const returned = new Set(data.map((e) => e.taxon_id))
+      for (const entry of data) names[entry.taxon_id] = entry.taxon_name
       for (const id of chunk) {
         if (returned.has(id)) valid.push(id)
         else invalid.push(id)
@@ -71,15 +73,16 @@ export class UnipeptService {
       onProgress?.(i + 1, chunks.length)
     }
 
-    return { valid, invalid }
+    return { valid, invalid, names }
   }
 
   async collectDescendants(
     taxaIds: number[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<{ descendants: number[]; warnings: string[] }> {
+  ): Promise<{ descendants: number[]; byTaxon: Record<number, number[]>; warnings: string[] }> {
     const allDescendants = new Set<number>()
+    const byTaxon: Record<number, number[]> = {}
     const warnings: string[] = []
     const chunks = chunked(taxaIds, this.config.batchSize)
 
@@ -101,29 +104,34 @@ export class UnipeptService {
 
       for (const entry of data) {
         if (entry.descendants && entry.descendants.length > 0) {
+          byTaxon[entry.taxon_id] = entry.descendants
           for (const d of entry.descendants) allDescendants.add(d)
         }
       }
       onProgress?.(i + 1, chunks.length)
     }
 
-    return { descendants: [...allDescendants], warnings }
+    return { descendants: [...allDescendants], byTaxon, warnings }
   }
 
   async lookupLcas(
     peptides: string[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<Map<string, Set<number>>> {
-    const result = new Map<string, Set<number>>()
+  ): Promise<{ lineageByPeptide: Map<string, Set<number>>; lcaByPeptide: Map<string, { id: number; name: string; rank: string }> }> {
+    const lineageByPeptide = new Map<string, Set<number>>()
+    const lcaByPeptide = new Map<string, { id: number; name: string; rank: string }>()
     const chunks = chunked(peptides, this.config.batchSize)
+    const total = chunks.length
+    let completedChunks = 0
+    let nextIdx = 0
 
-    for (const [i, chunk] of chunks.entries()) {
+    const processChunk = async (chunk: string[]): Promise<void> => {
       const params = new URLSearchParams()
       for (const pep of chunk) params.append('input[]', pep)
       params.append('equate_il', String(this.config.equateIL))
       params.append('extra', 'true')
-      params.append('names', 'false')
+      params.append('names', 'true')
 
       const res = await this.fetchWithRetry(
         `${this.config.unipeptUrl}/api/v2/pept2lca.json`,
@@ -139,12 +147,29 @@ export class UnipeptService {
           const v = entry[field]
           if (v !== null && v !== undefined && v !== 0) ids.add(v)
         }
-        result.set(entry.peptide, ids)
+        lineageByPeptide.set(entry.peptide, ids)
+        lcaByPeptide.set(entry.peptide, {
+          id: entry.taxon_id,
+          name: entry.taxon_name ?? '',
+          rank: entry.taxon_rank ?? '',
+        })
       }
-      onProgress?.(i + 1, chunks.length)
+
+      completedChunks++
+      onProgress?.(completedChunks, total)
     }
 
-    return result
+    const worker = async (): Promise<void> => {
+      let idx: number
+      while ((idx = nextIdx++) < chunks.length) {
+        await processChunk(chunks[idx]!)
+      }
+    }
+
+    const workerCount = Math.min(this.config.parallelRequests, chunks.length)
+    await Promise.all(Array.from({ length: workerCount }, worker))
+
+    return { lineageByPeptide, lcaByPeptide }
   }
 
   async searchTaxa(

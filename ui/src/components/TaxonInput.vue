@@ -2,11 +2,15 @@
 import { ref } from 'vue'
 import { usePipelineStore } from '@/stores/pipeline'
 import { useConfigStore } from '@/stores/config'
+import { usePipelineStatus } from '@/composables/usePipelineStatus'
 import { parseTaxonInput } from '@/utils/peptides'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
 import type { TaxonSuggestion } from '@/types'
+import { rankColor } from '@/utils/colors'
 import TaxonBrowser from './TaxonBrowser.vue'
+
+const props = withDefaults(defineProps<{ hideButtons?: boolean }>(), { hideButtons: false })
 
 const pipeline = usePipelineStore()
 const config = useConfigStore()
@@ -15,6 +19,12 @@ const selectedTaxa = ref<TaxonSuggestion[]>([])
 const inputErrors = ref<string[]>([])
 const fileInput = ref<HTMLInputElement | null>(null)
 const fileLoading = ref(false)
+const showTaxonDialog = ref(false)
+
+
+function deselect(taxon: TaxonSuggestion) {
+  selectedTaxa.value = selectedTaxa.value.filter((t) => t.id !== taxon.id)
+}
 
 function makeRepo(): TaxonRepository {
   return new TaxonRepository(new UnipeptService({
@@ -64,6 +74,11 @@ async function onFileChange(event: Event) {
   }
 }
 
+function clearAll() {
+  selectedTaxa.value = []
+  inputErrors.value = []
+}
+
 function runPipeline() {
   if (selectedTaxa.value.length === 0) {
     inputErrors.value = ['Select at least one taxon before running the pipeline.']
@@ -73,35 +88,111 @@ function runPipeline() {
   void pipeline.run(selectedTaxa.value.map((t) => t.id))
 }
 
-const isRunning = () => pipeline.status === 'running'
-const isFinished = () => ['done', 'error', 'cancelled'].includes(pipeline.status)
+const { isRunning, isFinished } = usePipelineStatus()
+
+defineExpose({ runPipeline, fileLoading, triggerFileInput: () => fileInput.value?.click(), selectedTaxa })
 </script>
 
 <template>
-  <v-card class="mb-4">
-    <v-card-title class="text-subtitle-1 font-weight-medium pa-4 pb-2">
-      Select Taxa
-    </v-card-title>
-    <v-divider />
-    <v-card-text class="pt-4">
-      <TaxonBrowser v-model="selectedTaxa" />
-
-      <v-alert
-        v-for="(err, i) in inputErrors"
-        :key="i"
-        type="error"
+  <div class="px-4 pt-4 pb-3">
+    <!-- Section header -->
+    <div class="d-flex align-center mb-3">
+      <span class="text-caption text-uppercase text-medium-emphasis font-weight-medium">Selected Taxa</span>
+      <v-chip
+        v-if="selectedTaxa.length > 0"
+        size="x-small"
+        color="secondary"
         variant="tonal"
+        class="ml-2"
+      >
+        {{ selectedTaxa.length }}
+      </v-chip>
+      <v-spacer />
+      <v-btn
+        v-if="selectedTaxa.length > 0"
+        variant="text"
+        size="x-small"
+        color="primary"
         density="compact"
-        class="mt-2 mb-1 text-caption"
-        :text="err"
-      />
+        class="pa-0 text-caption"
+        @click="clearAll"
+      >
+        Clear all
+      </v-btn>
+    </div>
 
+    <!-- Selected taxa chips -->
+    <div v-if="selectedTaxa.length > 0" class="d-flex flex-wrap ga-1 mb-3">
+      <v-chip
+        v-for="taxon in selectedTaxa"
+        :key="taxon.id"
+        closable
+        :color="rankColor(taxon.rank)"
+        variant="tonal"
+        @click:close="deselect(taxon)"
+      >
+        {{ taxon.name }}
+        <span class="text-medium-emphasis ml-2" style="font-size: 0.75em;">{{ taxon.id }}</span>
+      </v-chip>
+    </div>
+
+    <!-- Error alerts -->
+    <v-alert
+      v-for="(err, i) in inputErrors"
+      :key="i"
+      type="error"
+      variant="tonal"
+      density="compact"
+      class="mb-2 text-caption"
+      :text="err"
+    />
+
+    <!-- Add taxa button -->
+    <v-btn
+      variant="outlined"
+      prepend-icon="mdi-plus"
+      block
+      @click="showTaxonDialog = true"
+    >
+      Add taxa
+    </v-btn>
+
+    <!-- Hidden file input -->
+    <input
+      ref="fileInput"
+      type="file"
+      accept=".txt,text/plain"
+      style="display: none"
+      @change="onFileChange"
+    />
+
+    <!-- Taxon browser dialog -->
+    <v-dialog v-model="showTaxonDialog" max-width="960" scrollable>
+      <v-card>
+        <v-card-title class="text-subtitle-1 font-weight-medium pa-4 pb-2">
+          Select Taxa
+        </v-card-title>
+        <v-divider />
+        <v-card-text>
+          <TaxonBrowser v-model="selectedTaxa" />
+        </v-card-text>
+        <v-divider />
+        <v-card-actions>
+          <v-spacer />
+          <v-btn color="primary" variant="flat" @click="showTaxonDialog = false">
+            Done
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <template v-if="!props.hideButtons">
       <div class="d-flex flex-wrap mt-4">
         <v-btn
           color="primary"
           variant="flat"
           prepend-icon="mdi-play"
-          :disabled="isRunning()"
+          :disabled="isRunning"
           class="mr-1"
           @click="runPipeline"
         >
@@ -111,23 +202,16 @@ const isFinished = () => ['done', 'error', 'cancelled'].includes(pipeline.status
         <v-btn
           variant="tonal"
           prepend-icon="mdi-upload"
-          :disabled="isRunning()"
+          :disabled="isRunning"
           :loading="fileLoading"
           class="mx-1"
           @click="fileInput?.click()"
         >
           Import from file
         </v-btn>
-        <input
-          ref="fileInput"
-          type="file"
-          accept=".txt,text/plain"
-          style="display: none"
-          @change="onFileChange"
-        />
 
         <v-btn
-          v-if="isRunning()"
+          v-if="isRunning"
           color="warning"
           variant="tonal"
           prepend-icon="mdi-stop"
@@ -138,7 +222,7 @@ const isFinished = () => ['done', 'error', 'cancelled'].includes(pipeline.status
         </v-btn>
 
         <v-btn
-          v-if="isFinished()"
+          v-if="isFinished"
           variant="tonal"
           prepend-icon="mdi-refresh"
           class="ml-1"
@@ -147,6 +231,6 @@ const isFinished = () => ['done', 'error', 'cancelled'].includes(pipeline.status
           Reset
         </v-btn>
       </div>
-    </v-card-text>
-  </v-card>
+    </template>
+  </div>
 </template>

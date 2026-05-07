@@ -5,6 +5,7 @@ import type { TaxonSuggestion } from '@/types'
 import { useConfigStore } from '@/stores/config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
+import { rankColor } from '@/utils/colors'
 
 const selectedTaxa = defineModel<TaxonSuggestion[]>({ default: [] })
 
@@ -16,37 +17,6 @@ const tableLoading = ref(false)
 const rows = ref<TaxonSuggestion[]>([])
 const totalRows = ref(0)
 
-const RANK_COLORS: Record<string, string> = {
-  domain:          'red',
-  superkingdom:    'red-darken-2',
-  kingdom:         'pink',
-  subkingdom:      'pink-darken-2',
-  superphylum:     'purple-lighten-2',
-  phylum:          'purple',
-  subphylum:       'purple-darken-2',
-  superclass:      'indigo-lighten-2',
-  class:           'indigo',
-  subclass:        'indigo-darken-2',
-  superorder:      'blue-lighten-2',
-  order:           'blue',
-  suborder:        'blue-darken-2',
-  superfamily:     'cyan-lighten-2',
-  family:          'cyan',
-  subfamily:       'cyan-darken-2',
-  tribe:           'teal-lighten-2',
-  genus:           'teal',
-  subgenus:        'teal-darken-2',
-  'species group': 'green-lighten-2',
-  species:         'green',
-  subspecies:      'light-green',
-  strain:          'lime',
-  varietas:        'amber',
-  forma:           'orange',
-}
-
-function rankColor(rank: string): string {
-  return RANK_COLORS[rank.toLowerCase()] ?? 'grey'
-}
 
 const headers: DataTableHeader[] = [
   { title: 'NCBI ID', align: 'start', value: 'id',     width: '15%', sortable: true },

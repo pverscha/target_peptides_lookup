@@ -29,7 +29,7 @@ export class TaxonRepository {
     taxaIds: number[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<{ valid: number[]; invalid: number[] }> {
+  ): Promise<{ valid: number[]; invalid: number[]; names: Record<number, string> }> {
     return this.unipept.validateTaxa(taxaIds, signal, onProgress)
   }
 
@@ -50,7 +50,7 @@ export class TaxonRepository {
     taxaIds: number[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<{ descendants: number[]; warnings: string[] }> {
+  ): Promise<{ descendants: number[]; byTaxon: Record<number, number[]>; warnings: string[] }> {
     return this.unipept.collectDescendants(taxaIds, signal, onProgress)
   }
 
@@ -72,7 +72,7 @@ export class TaxonRepository {
     peptides: string[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<Map<string, Set<number>>> {
+  ): Promise<{ lineageByPeptide: Map<string, Set<number>>; lcaByPeptide: Map<string, { id: number; name: string; rank: string }> }> {
     return this.unipept.lookupLcas(peptides, signal, onProgress)
   }
 

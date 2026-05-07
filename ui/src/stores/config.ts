@@ -8,7 +8,8 @@ const DEFAULTS: Config = {
   unipeptUrl: 'https://api.unipept.ugent.be',
   opensearchUrl: 'http://patty.taild1497.ts.net:9200',
   opensearchIndex: 'uniprot_entries',
-  batchSize: 100,
+  batchSize: 1000,
+  parallelRequests: 5,
   minLength: 6,
   equateIL: true,
   cleavageMethod: 'tryptic',
@@ -32,6 +33,7 @@ export const useConfigStore = defineStore('config', () => {
   const opensearchUrl = ref(initial.opensearchUrl)
   const opensearchIndex = ref(initial.opensearchIndex)
   const batchSize = ref(initial.batchSize)
+  const parallelRequests = ref(initial.parallelRequests)
   const minLength = ref(initial.minLength)
   const equateIL = ref(initial.equateIL)
   const cleavageMethod = ref(initial.cleavageMethod)
@@ -39,13 +41,14 @@ export const useConfigStore = defineStore('config', () => {
   const minProteins = ref(initial.minProteins)
 
   watch(
-    [unipeptUrl, opensearchUrl, opensearchIndex, batchSize, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins],
+    [unipeptUrl, opensearchUrl, opensearchIndex, batchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins],
     () => {
       const cfg: Config = {
         unipeptUrl: unipeptUrl.value,
         opensearchUrl: opensearchUrl.value,
         opensearchIndex: opensearchIndex.value,
         batchSize: batchSize.value,
+        parallelRequests: parallelRequests.value,
         minLength: minLength.value,
         equateIL: equateIL.value,
         cleavageMethod: cleavageMethod.value,
@@ -61,6 +64,7 @@ export const useConfigStore = defineStore('config', () => {
     opensearchUrl.value = DEFAULTS.opensearchUrl
     opensearchIndex.value = DEFAULTS.opensearchIndex
     batchSize.value = DEFAULTS.batchSize
+    parallelRequests.value = DEFAULTS.parallelRequests
     minLength.value = DEFAULTS.minLength
     equateIL.value = DEFAULTS.equateIL
     cleavageMethod.value = DEFAULTS.cleavageMethod
@@ -68,5 +72,5 @@ export const useConfigStore = defineStore('config', () => {
     minProteins.value = DEFAULTS.minProteins
   }
 
-  return { unipeptUrl, opensearchUrl, opensearchIndex, batchSize, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins, resetToDefaults }
+  return { unipeptUrl, opensearchUrl, opensearchIndex, batchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins, resetToDefaults }
 })

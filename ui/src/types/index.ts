@@ -3,6 +3,7 @@ export interface Config {
   opensearchUrl: string
   opensearchIndex: string
   batchSize: number
+  parallelRequests: number
   minLength: number
   equateIL: boolean
   cleavageMethod: 'tryptic' | 'custom'
@@ -13,6 +14,7 @@ export interface Config {
 export interface UnipeptConfig {
   unipeptUrl: string
   batchSize: number
+  parallelRequests: number
   equateIL: boolean
 }
 

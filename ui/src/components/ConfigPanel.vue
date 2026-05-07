@@ -52,6 +52,16 @@ const config = useConfigStore()
         :max="1000"
         density="compact"
         variant="outlined"
+        class="mb-3"
+      />
+      <v-text-field
+        v-model.number="config.parallelRequests"
+        label="Parallel LCA requests"
+        type="number"
+        :min="1"
+        :max="20"
+        density="compact"
+        variant="outlined"
         class="mb-4"
       />
       <v-btn
