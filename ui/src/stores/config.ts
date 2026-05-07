@@ -11,6 +11,9 @@ const DEFAULTS: Config = {
   batchSize: 100,
   minLength: 6,
   equateIL: true,
+  cleavageMethod: 'tryptic',
+  cleavageRegex: '(?<=[KR])(?!P)',
+  minProteins: 1,
 }
 
 function loadStored(): Config {
@@ -31,9 +34,12 @@ export const useConfigStore = defineStore('config', () => {
   const batchSize = ref(initial.batchSize)
   const minLength = ref(initial.minLength)
   const equateIL = ref(initial.equateIL)
+  const cleavageMethod = ref(initial.cleavageMethod)
+  const cleavageRegex = ref(initial.cleavageRegex)
+  const minProteins = ref(initial.minProteins)
 
   watch(
-    [unipeptUrl, opensearchUrl, opensearchIndex, batchSize, minLength, equateIL],
+    [unipeptUrl, opensearchUrl, opensearchIndex, batchSize, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins],
     () => {
       const cfg: Config = {
         unipeptUrl: unipeptUrl.value,
@@ -42,6 +48,9 @@ export const useConfigStore = defineStore('config', () => {
         batchSize: batchSize.value,
         minLength: minLength.value,
         equateIL: equateIL.value,
+        cleavageMethod: cleavageMethod.value,
+        cleavageRegex: cleavageRegex.value,
+        minProteins: minProteins.value,
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg))
     },
@@ -54,7 +63,10 @@ export const useConfigStore = defineStore('config', () => {
     batchSize.value = DEFAULTS.batchSize
     minLength.value = DEFAULTS.minLength
     equateIL.value = DEFAULTS.equateIL
+    cleavageMethod.value = DEFAULTS.cleavageMethod
+    cleavageRegex.value = DEFAULTS.cleavageRegex
+    minProteins.value = DEFAULTS.minProteins
   }
 
-  return { unipeptUrl, opensearchUrl, opensearchIndex, batchSize, minLength, equateIL, resetToDefaults }
+  return { unipeptUrl, opensearchUrl, opensearchIndex, batchSize, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins, resetToDefaults }
 })

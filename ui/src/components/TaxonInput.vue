@@ -82,7 +82,8 @@ const isFinished = () => ['done', 'error', 'cancelled'].includes(pipeline.status
     <v-card-title class="text-subtitle-1 font-weight-medium pa-4 pb-2">
       Select Taxa
     </v-card-title>
-    <v-card-text class="pt-0">
+    <v-divider />
+    <v-card-text class="pt-4">
       <TaxonBrowser v-model="selectedTaxa" />
 
       <v-alert

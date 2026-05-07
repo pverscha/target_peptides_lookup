@@ -5,6 +5,9 @@ export interface Config {
   batchSize: number
   minLength: number
   equateIL: boolean
+  cleavageMethod: 'tryptic' | 'custom'
+  cleavageRegex: string
+  minProteins: number
 }
 
 export interface UnipeptConfig {

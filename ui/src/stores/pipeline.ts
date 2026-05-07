@@ -6,7 +6,8 @@ import { UnipeptService } from '@/services/UnipeptService'
 import { OpensearchService } from '@/services/OpensearchService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
 import { ProteinRepository } from '@/repositories/ProteinRepository'
-import { digestProtein, filterUnique, intersectSets } from '@/utils/peptides'
+import { digestProtein, filterUnique, intersectSets, TRYPSIN_RE } from '@/utils/peptides'
+import { fmtN } from '@/utils/format'
 
 const STEP_DEFS = [
   { id: 'validate',    label: 'Validate taxon IDs' },
@@ -82,41 +83,41 @@ export const usePipelineStore = defineStore('pipeline', () => {
 
     try {
       // ── Step 1: Validate ────────────────────────────────────────────────────
-      setStep('validate', { status: 'running', progress: null, detail: `Checking ${inputTaxaIds.length} IDs…` })
+      setStep('validate', { status: 'running', progress: null, detail: `Checking ${fmtN(inputTaxaIds.length)} IDs…` })
       const { valid, invalid } = await taxonRepo.validate(
         inputTaxaIds, signal,
-        (done, total) => setStep('validate', { progress: done / total, detail: `Batch ${done}/${total}` }),
+        (done, total) => setStep('validate', { progress: done / total, detail: `Batch ${fmtN(done)}/${fmtN(total)}` }),
       )
       for (const id of invalid) addLog('warning', `Unknown taxon ID: ${id}`)
       if (valid.length === 0) throw new Error('None of the provided taxon IDs are known to Unipept.')
       validTaxaIds.value = valid
-      setStep('validate', { status: 'done', progress: 1, detail: `${valid.length}/${inputTaxaIds.length} valid` })
+      setStep('validate', { status: 'done', progress: 1, detail: `${fmtN(valid.length)}/${fmtN(inputTaxaIds.length)} valid` })
 
       // ── Step 2: Descendants ─────────────────────────────────────────────────
       setStep('descendants', { status: 'running', progress: null, detail: 'Fetching…' })
       const { descendants, warnings: descWarnings } = await taxonRepo.getDescendants(
         valid, signal,
-        (done, total) => setStep('descendants', { progress: done / total, detail: `Batch ${done}/${total}` }),
+        (done, total) => setStep('descendants', { progress: done / total, detail: `Batch ${fmtN(done)}/${fmtN(total)}` }),
       )
       for (const w of descWarnings) addLog('warning', w)
       if (descendants.length === 0) throw new Error('No species-level descendants found for any input taxon.')
       descendantIds.value = descendants
-      setStep('descendants', { status: 'done', progress: 1, detail: `${descendants.length} species` })
-      addLog('info', `Collected ${descendants.length} unique species-level descendants.`)
+      setStep('descendants', { status: 'done', progress: 1, detail: `${fmtN(descendants.length)} species` })
+      addLog('info', `Collected ${fmtN(descendants.length)} unique species-level descendants.`)
 
       // ── Step 3: Count proteins ──────────────────────────────────────────────
       setStep('count', { status: 'running', progress: null, detail: 'Querying aggregations…' })
       const counts = await proteinRepo.countByTaxon(
         descendants, signal,
-        (done, total) => setStep('count', { progress: done / total, detail: `${done}/${total} chunks` }),
+        (done, total) => setStep('count', { progress: done / total, detail: `${fmtN(done)}/${fmtN(total)} chunks` }),
       )
       proteinCounts.value = counts
-      const populated = descendants.filter((t) => (counts[t] ?? 0) > 0)
-      const empty = descendants.filter((t) => !(counts[t] ?? 0))
-      for (const t of empty) addLog('warning', `Excluded from intersection (no proteins in OpenSearch): ${t}`)
-      if (empty.length > 0) addLog('info', `${empty.length} of ${descendants.length} descendant taxa excluded (no proteins).`)
-      if (populated.length === 0) throw new Error('No descendant taxa have proteins in OpenSearch.')
-      setStep('count', { status: 'done', progress: 1, detail: `${populated.length} taxa with proteins` })
+      const populated = descendants.filter((t) => (counts[t] ?? 0) >= config.minProteins)
+      const excluded = descendants.filter((t) => (counts[t] ?? 0) < config.minProteins)
+      for (const t of excluded) addLog('warning', `Excluded from intersection (fewer than ${config.minProteins} protein(s) in OpenSearch): ${t}`)
+      if (excluded.length > 0) addLog('info', `${fmtN(excluded.length)} of ${fmtN(descendants.length)} descendant taxa excluded (below minimum protein threshold).`)
+      if (populated.length === 0) throw new Error('No descendant taxa meet the minimum protein threshold.')
+      setStep('count', { status: 'done', progress: 1, detail: `${fmtN(populated.length)} taxa with proteins` })
 
       // ── Step 4: Intersect ───────────────────────────────────────────────────
       setStep('intersect', { status: 'running', progress: null, detail: 'Starting…' })
@@ -126,17 +127,22 @@ export const usePipelineStore = defineStore('pipeline', () => {
       let candidate: Set<string> | null = null
       let earlyExit = false
 
+      const cleavageRe =
+        config.cleavageMethod === 'tryptic'
+          ? TRYPSIN_RE
+          : new RegExp(config.cleavageRegex, 'g')
+
       for (const taxId of sortedTaxa) {
         if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
         const taxPeptides = new Set<string>()
 
         for await (const seq of proteinRepo.streamSequences(taxId, signal)) {
-          digestProtein(seq, config.equateIL, config.minLength, taxPeptides)
+          digestProtein(seq, config.equateIL, config.minLength, taxPeptides, cleavageRe)
           processed++
           if (processed % 200 === 0) {
             setStep('intersect', {
               progress: processed / totalProteins,
-              detail: `${processed.toLocaleString()}/${totalProteins.toLocaleString()} proteins (taxon ${taxId})`,
+              detail: `${fmtN(processed)}/${fmtN(totalProteins)} proteins (taxon ${taxId})`,
             })
           }
         }
@@ -155,9 +161,9 @@ export const usePipelineStore = defineStore('pipeline', () => {
       setStep('intersect', {
         status: 'done',
         progress: 1,
-        detail: earlyExit ? 'No shared peptides' : `${core.length.toLocaleString()} shared peptides`,
+        detail: earlyExit ? 'No shared peptides' : `${fmtN(core.length)} shared peptides`,
       })
-      addLog('info', `Core peptidome size (intersection across organisms): ${core.length}`)
+      addLog('info', `Core peptidome size (intersection across organisms): ${fmtN(core.length)}`)
 
       if (core.length === 0) {
         addLog('info', 'No peptides shared across all organisms — nothing to report.')
@@ -172,19 +178,23 @@ export const usePipelineStore = defineStore('pipeline', () => {
       setStep('lca', { status: 'running', progress: null, detail: 'Querying Unipept pept2lca…' })
       const lineageByPeptide = await taxonRepo.getLcas(
         core, signal,
-        (done, total) => setStep('lca', { progress: done / total, detail: `Batch ${done}/${total}` }),
+        (done, total) => {
+          const peptidesDone = Math.min(done * config.batchSize, core.length)
+          const pct = ((done / total) * 100).toFixed(1)
+          setStep('lca', { progress: done / total, detail: `${fmtN(peptidesDone)}/${fmtN(core.length)} peptides (${pct}%)` })
+        },
       )
       const missing = core.filter((p) => !lineageByPeptide.has(p))
       for (const p of missing) addLog('warning', `No LCA returned for peptide: ${p}`)
-      setStep('lca', { status: 'done', progress: 1, detail: `${lineageByPeptide.size} LCAs retrieved` })
+      setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lineageByPeptide.size)} LCAs retrieved` })
 
       // ── Step 6: Filter ──────────────────────────────────────────────────────
       setStep('filter', { status: 'running', progress: null, detail: 'Filtering…' })
       const inputSet = new Set(valid)
       const unique = filterUnique(core, lineageByPeptide, inputSet)
       uniquePeptides.value = unique
-      setStep('filter', { status: 'done', progress: 1, detail: `${unique.length} unique peptides` })
-      addLog('info', `${unique.length} peptides remain after uniqueness filter.`)
+      setStep('filter', { status: 'done', progress: 1, detail: `${fmtN(unique.length)} unique peptides` })
+      addLog('info', `${fmtN(unique.length)} peptides remain after uniqueness filter.`)
       status.value = 'done'
 
     } catch (err: unknown) {

@@ -16,7 +16,7 @@ const config = useConfigStore()
     width="360"
   >
     <v-list-item
-      title="Settings"
+      title="Connection"
       prepend-icon="mdi-cog-outline"
       class="py-4"
     />
@@ -52,23 +52,7 @@ const config = useConfigStore()
         :max="1000"
         density="compact"
         variant="outlined"
-        class="mb-3"
-      />
-      <v-text-field
-        v-model.number="config.minLength"
-        label="Minimum peptide length"
-        type="number"
-        :min="1"
-        density="compact"
-        variant="outlined"
-        class="mb-3"
-      />
-      <v-switch
-        v-model="config.equateIL"
-        label="Equate I/L (isoleucine and leucine)"
-        color="primary"
-        density="compact"
-        class="mb-2"
+        class="mb-4"
       />
       <v-btn
         variant="tonal"

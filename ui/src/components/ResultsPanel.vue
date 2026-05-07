@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { usePipelineStore } from '@/stores/pipeline'
+import { fmtN } from '@/utils/format'
 
 const pipeline = usePipelineStore()
 
@@ -25,31 +26,31 @@ function downloadTsv() {
     <v-card-title class="text-subtitle-1 font-weight-medium pa-4 pb-2">
       Results
     </v-card-title>
-
-    <v-card-text class="pt-0">
+    <v-divider />
+    <v-card-text class="pt-4">
       <!-- Stats row -->
       <v-row dense class="mb-3">
         <v-col cols="6" sm="3">
           <v-card variant="tonal" color="primary" class="pa-3 text-center">
-            <div class="text-h6 font-weight-bold">{{ pipeline.validTaxaIds.length }}</div>
+            <div class="text-h6 font-weight-bold">{{ fmtN(pipeline.validTaxaIds.length) }}</div>
             <div class="text-caption">Input taxa</div>
           </v-card>
         </v-col>
         <v-col cols="6" sm="3">
           <v-card variant="tonal" color="secondary" class="pa-3 text-center">
-            <div class="text-h6 font-weight-bold">{{ pipeline.descendantIds.length }}</div>
+            <div class="text-h6 font-weight-bold">{{ fmtN(pipeline.descendantIds.length) }}</div>
             <div class="text-caption">Descendant species</div>
           </v-card>
         </v-col>
         <v-col cols="6" sm="3">
           <v-card variant="tonal" color="info" class="pa-3 text-center">
-            <div class="text-h6 font-weight-bold">{{ pipeline.intersectionPeptides.length.toLocaleString() }}</div>
+            <div class="text-h6 font-weight-bold">{{ fmtN(pipeline.intersectionPeptides.length) }}</div>
             <div class="text-caption">Shared peptides</div>
           </v-card>
         </v-col>
         <v-col cols="6" sm="3">
           <v-card variant="tonal" color="success" class="pa-3 text-center">
-            <div class="text-h6 font-weight-bold">{{ pipeline.uniquePeptides.length.toLocaleString() }}</div>
+            <div class="text-h6 font-weight-bold">{{ fmtN(pipeline.uniquePeptides.length) }}</div>
             <div class="text-caption">Unique peptides</div>
           </v-card>
         </v-col>
@@ -81,7 +82,7 @@ function downloadTsv() {
         prepend-icon="mdi-download"
         @click="downloadTsv"
       >
-        Download ({{ pipeline.uniquePeptides.length.toLocaleString() }} peptides)
+        Download ({{ fmtN(pipeline.uniquePeptides.length) }} peptides)
       </v-btn>
     </v-card-actions>
   </v-card>

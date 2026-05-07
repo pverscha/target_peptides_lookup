@@ -1,4 +1,4 @@
-const TRYPSIN_RE = /(?<=[KR])(?!P)/g
+export const TRYPSIN_RE = /(?<=[KR])(?!P)/g
 
 export const LINEAGE_ID_FIELDS = [
   'domain_id', 'realm_id', 'kingdom_id', 'subkingdom_id',
@@ -33,9 +33,10 @@ export function digestProtein(
   equateIL: boolean,
   minLength: number,
   out: Set<string>,
+  cleavageRe: RegExp = TRYPSIN_RE,
 ): void {
   const seq = equateIL ? sequence.replaceAll('I', 'L') : sequence
-  for (const frag of seq.split(TRYPSIN_RE)) {
+  for (const frag of seq.split(cleavageRe)) {
     if (frag.length >= minLength) out.add(frag)
   }
 }

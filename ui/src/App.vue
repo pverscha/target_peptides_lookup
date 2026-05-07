@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import ConfigPanel from './components/ConfigPanel.vue'
 import TaxonInput from './components/TaxonInput.vue'
+import AnalysisConfig from './components/AnalysisConfig.vue'
 import PipelineProgress from './components/PipelineProgress.vue'
 import ResultsPanel from './components/ResultsPanel.vue'
 import LogViewer from './components/LogViewer.vue'
@@ -28,11 +29,33 @@ const showConfig = ref(false)
 
     <v-main>
       <v-container max-width="1520" class="py-6">
-        <TaxonInput />
-        <PipelineProgress />
-        <LogViewer />
-        <ResultsPanel />
+        <v-row class="align-start">
+          <!-- Left column: pipeline flow -->
+          <v-col cols="12" md="8">
+            <AnalysisConfig />
+            <TaxonInput />
+            <PipelineProgress />
+            <ResultsPanel />
+          </v-col>
+
+          <!-- Right column: log -->
+          <v-col cols="12" md="4" class="log-column">
+            <LogViewer />
+          </v-col>
+        </v-row>
       </v-container>
     </v-main>
   </v-app>
 </template>
+
+<style scoped>
+.log-column {
+  max-height: calc(100vh - 64px - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.log-column > :deep(.log-card) {
+  max-height: calc(100vh - 64px - 48px);
+}
+</style>
