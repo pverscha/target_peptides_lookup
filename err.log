@@ -1,5 +1,0 @@
-[INFO] Read 5 unique taxon IDs from test_taxa.txt.
-[INFO] 5/5 input taxon IDs are known to Unipept.
-[INFO] Collected 5 unique species-level descendants.
-[INFO] Core peptidome size (intersection across organisms): 71
-[INFO] 0 peptides remain after uniqueness filter.
