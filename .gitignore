@@ -1,2 +1,9 @@
-.venv
-.claude
+# Python virtual environment
+.venv/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Claude Code
+.claude/
