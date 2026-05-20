@@ -1,5 +1,6 @@
 import type { OpensearchConfig } from '@/types'
 import { chunked } from '@/utils/peptides'
+import { isAbortError } from '@/utils/abort'
 
 interface OsHit {
   _id: string
@@ -126,7 +127,7 @@ export class OpensearchService {
         signal,
       })
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err
+      if (isAbortError(err)) throw err
       const urlShort = url.replace(/\?.*/, '')
       throw new Error(
         `Cannot reach OpenSearch at ${urlShort} — check the URL, ensure the instance is running, and verify CORS headers (http.cors.enabled: true in opensearch.yml).`,

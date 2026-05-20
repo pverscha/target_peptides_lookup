@@ -8,6 +8,7 @@ import { TaxonRepository } from '@/repositories/TaxonRepository'
 import { ProteinRepository } from '@/repositories/ProteinRepository'
 import { digestProtein, filterUnique, intersectSets, TRYPSIN_RE } from '@/utils/peptides'
 import { fmtN } from '@/utils/format'
+import { isAbortError } from '@/utils/abort'
 
 const STEP_DEFS = [
   { id: 'validate',    label: 'Validate taxon IDs' },
@@ -309,7 +310,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
       status.value = 'done'
 
     } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
+      if (isAbortError(err)) {
         status.value = 'cancelled'
         addLog('info', 'Pipeline cancelled by user.')
         for (const s of steps.value) {

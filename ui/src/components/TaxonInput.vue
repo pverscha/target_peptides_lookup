@@ -6,8 +6,8 @@ import { parseTaxonInput } from '@/utils/peptides'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
 import type { TaxonSuggestion } from '@/types'
-import { rankColor } from '@/utils/colors'
 import TaxonBrowser from './TaxonBrowser.vue'
+import TaxonChip from './TaxonChip.vue'
 
 const pipeline = usePipelineStore()
 const config = useConfigStore()
@@ -121,17 +121,12 @@ defineExpose({ runPipeline, selectedTaxa })
 
     <!-- Selected taxa chips -->
     <div v-if="selectedTaxa.length > 0" class="d-flex flex-wrap ga-1 mb-3">
-      <v-chip
+      <TaxonChip
         v-for="taxon in selectedTaxa"
         :key="taxon.id"
-        closable
-        :color="rankColor(taxon.rank)"
-        variant="tonal"
-        @click:close="deselect(taxon)"
-      >
-        {{ taxon.name }}
-        <span class="text-medium-emphasis ml-2" style="font-size: 0.75em;">NCBI {{ taxon.id }}</span>
-      </v-chip>
+        :taxon="taxon"
+        @close="deselect(taxon)"
+      />
     </div>
 
     <!-- Empty state placeholder -->
@@ -186,7 +181,7 @@ defineExpose({ runPipeline, selectedTaxa })
     />
 
     <!-- Taxon browser dialog -->
-    <v-dialog v-model="showTaxonDialog" max-width="960" scrollable>
+    <v-dialog v-model="showTaxonDialog" max-width="1200" scrollable>
       <v-card>
         <v-card-title class="text-subtitle-1 font-weight-medium pa-4 pb-2">
           Select Taxa
