@@ -5,6 +5,8 @@ import type { TaxonSuggestion } from '@/types'
 import { useConfigStore } from '@/stores/config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
+import { OpensearchService } from '@/services/OpensearchService'
+import { ProteinRepository } from '@/repositories/ProteinRepository'
 import { rankColor } from '@/utils/colors'
 
 const selectedTaxa = defineModel<TaxonSuggestion[]>({ default: [] })
@@ -16,13 +18,15 @@ const debouncedFilter = ref('')
 const tableLoading = ref(false)
 const rows = ref<TaxonSuggestion[]>([])
 const totalRows = ref(0)
+const proteinCounts = ref<Record<number, number>>({})
 
 
 const headers: DataTableHeader[] = [
-  { title: 'NCBI ID', align: 'start', value: 'id',     width: '15%', sortable: true },
-  { title: 'Name',    align: 'start', value: 'name',   width: '45%', sortable: true },
-  { title: 'Rank',    align: 'start', value: 'rank',   width: '25%', sortable: true },
-  { title: '',        align: 'start', value: 'action', width: '15%', sortable: false },
+  { title: 'NCBI ID',  align: 'start', value: 'id',       width: '12%', sortable: true  },
+  { title: 'Name',     align: 'start', value: 'name',     width: '38%', sortable: true  },
+  { title: 'Rank',     align: 'start', value: 'rank',     width: '20%', sortable: true  },
+  { title: 'Proteins', align: 'end',   value: 'proteins', width: '15%', sortable: false },
+  { title: '',         align: 'start', value: 'action',   width: '15%', sortable: false },
 ]
 
 function isSelected(taxon: TaxonSuggestion): boolean {
@@ -53,6 +57,13 @@ function makeRepo(): TaxonRepository {
   }))
 }
 
+function makeProteinRepo(): ProteinRepository {
+  return new ProteinRepository(new OpensearchService({
+    opensearchUrl: config.opensearchUrl,
+    opensearchIndex: config.opensearchIndex,
+  }))
+}
+
 type TableOptions = {
   page: number
   itemsPerPage: number
@@ -80,6 +91,14 @@ async function loadTaxa(options: TableOptions) {
 
     totalRows.value = count
     rows.value = page
+
+    try {
+      proteinCounts.value = await makeProteinRepo().countByTaxon(page.map((t) => t.id), signal)
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      console.error('Failed to load protein counts:', err)
+      proteinCounts.value = {}
+    }
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') return
     console.error('Failed to load taxa:', err)
@@ -107,7 +126,7 @@ async function loadTaxa(options: TableOptions) {
           @click:close="deselect(taxon)"
         >
           {{ taxon.name }}
-          <span class="text-caption opacity-70">({{ taxon.id }})</span>
+          <span class="text-medium-emphasis ml-2" style="font-size: 0.75em; vertical-align: middle;">NCBI {{ taxon.id }}</span>
         </v-chip>
       </div>
     </div>
@@ -138,6 +157,11 @@ async function loadTaxa(options: TableOptions) {
           hide-details
           @click:clear="filterValue = ''"
         />
+      </template>
+
+      <template #item.proteins="{ item }">
+        <v-progress-circular v-if="tableLoading" indeterminate size="12" width="2" />
+        <span v-else class="text-body-2">{{ proteinCounts[item.id]?.toLocaleString() ?? '—' }}</span>
       </template>
 
       <template #item.rank="{ item }">

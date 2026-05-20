@@ -2,15 +2,12 @@
 import { ref } from 'vue'
 import { usePipelineStore } from '@/stores/pipeline'
 import { useConfigStore } from '@/stores/config'
-import { usePipelineStatus } from '@/composables/usePipelineStatus'
 import { parseTaxonInput } from '@/utils/peptides'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
 import type { TaxonSuggestion } from '@/types'
 import { rankColor } from '@/utils/colors'
 import TaxonBrowser from './TaxonBrowser.vue'
-
-const props = withDefaults(defineProps<{ hideButtons?: boolean }>(), { hideButtons: false })
 
 const pipeline = usePipelineStore()
 const config = useConfigStore()
@@ -30,6 +27,9 @@ function makeRepo(): TaxonRepository {
   return new TaxonRepository(new UnipeptService({
     unipeptUrl: config.unipeptUrl,
     batchSize: config.batchSize,
+    lcaBatchSize: config.lcaBatchSize,
+    taxaBatchSize: config.taxaBatchSize,
+    parallelRequests: config.parallelRequests,
     equateIL: config.equateIL,
   }))
 }
@@ -88,9 +88,7 @@ function runPipeline() {
   void pipeline.run(selectedTaxa.value.map((t) => t.id))
 }
 
-const { isRunning, isFinished } = usePipelineStatus()
-
-defineExpose({ runPipeline, fileLoading, triggerFileInput: () => fileInput.value?.click(), selectedTaxa })
+defineExpose({ runPipeline, selectedTaxa })
 </script>
 
 <template>
@@ -132,8 +130,18 @@ defineExpose({ runPipeline, fileLoading, triggerFileInput: () => fileInput.value
         @click:close="deselect(taxon)"
       >
         {{ taxon.name }}
-        <span class="text-medium-emphasis ml-2" style="font-size: 0.75em;">{{ taxon.id }}</span>
+        <span class="text-medium-emphasis ml-2" style="font-size: 0.75em;">NCBI {{ taxon.id }}</span>
       </v-chip>
+    </div>
+
+    <!-- Empty state placeholder -->
+    <div
+      v-else
+      class="d-flex flex-column align-center justify-center mb-3 pa-4 rounded"
+      style="border: 1px dashed rgba(var(--v-border-color), 0.4); min-height: 72px;"
+    >
+      <v-icon size="20" color="medium-emphasis" class="mb-1">mdi-filter-outline</v-icon>
+      <span class="text-caption text-medium-emphasis">No taxa selected</span>
     </div>
 
     <!-- Error alerts -->
@@ -147,15 +155,26 @@ defineExpose({ runPipeline, fileLoading, triggerFileInput: () => fileInput.value
       :text="err"
     />
 
-    <!-- Add taxa button -->
-    <v-btn
-      variant="outlined"
-      prepend-icon="mdi-plus"
-      block
-      @click="showTaxonDialog = true"
-    >
-      Add taxa
-    </v-btn>
+    <!-- Add taxa / import buttons -->
+    <div class="d-flex ga-2">
+      <v-btn
+        variant="outlined"
+        prepend-icon="mdi-plus"
+        class="flex-grow-1 flex-basis-0"
+        @click="showTaxonDialog = true"
+      >
+        Add taxa
+      </v-btn>
+      <v-btn
+        variant="outlined"
+        prepend-icon="mdi-file-import-outline"
+        :loading="fileLoading"
+        class="flex-grow-1 flex-basis-0"
+        @click="fileInput?.click()"
+      >
+        Import
+      </v-btn>
+    </div>
 
     <!-- Hidden file input -->
     <input
@@ -185,52 +204,5 @@ defineExpose({ runPipeline, fileLoading, triggerFileInput: () => fileInput.value
         </v-card-actions>
       </v-card>
     </v-dialog>
-
-    <template v-if="!props.hideButtons">
-      <div class="d-flex flex-wrap mt-4">
-        <v-btn
-          color="primary"
-          variant="flat"
-          prepend-icon="mdi-play"
-          :disabled="isRunning"
-          class="mr-1"
-          @click="runPipeline"
-        >
-          Run pipeline
-        </v-btn>
-
-        <v-btn
-          variant="tonal"
-          prepend-icon="mdi-upload"
-          :disabled="isRunning"
-          :loading="fileLoading"
-          class="mx-1"
-          @click="fileInput?.click()"
-        >
-          Import from file
-        </v-btn>
-
-        <v-btn
-          v-if="isRunning"
-          color="warning"
-          variant="tonal"
-          prepend-icon="mdi-stop"
-          class="ml-1"
-          @click="pipeline.cancel()"
-        >
-          Cancel
-        </v-btn>
-
-        <v-btn
-          v-if="isFinished"
-          variant="tonal"
-          prepend-icon="mdi-refresh"
-          class="ml-1"
-          @click="pipeline.reset()"
-        >
-          Reset
-        </v-btn>
-      </div>
-    </template>
   </div>
 </template>

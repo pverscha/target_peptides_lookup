@@ -77,6 +77,22 @@ export class TaxonRepository {
   }
 
   /**
+   * Returns the subset of `peptides` that are globally unique for `inputTaxonSet`.
+   *
+   * Uses pept2taxa to retrieve all UniProt organisms per peptide, then checks
+   * that every organism is a descendant of at least one input taxon. Peptides
+   * with no organisms in the pept2taxa response are excluded (conservative).
+   */
+  getUniquePeptides(
+    peptides: string[],
+    inputTaxonSet: Set<number>,
+    signal: AbortSignal,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<Set<string>> {
+    return this.unipept.lookupTaxa(peptides, inputTaxonSet, signal, onProgress)
+  }
+
+  /**
    * Fetches one page of taxa matching a text query against Unipept.
    *
    * The filter string is matched against taxon name, NCBI ID, and rank

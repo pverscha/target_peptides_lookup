@@ -42,7 +42,10 @@ export function digestProtein(
 }
 
 /**
- * Keep peptides whose LCA lineage set intersects the original input taxon set.
+ * Keep peptides whose LCA lineage set contains a given single taxon.
+ *
+ * Correct only when `inputTaxonSet` has exactly one element. For a multi-taxon
+ * global uniqueness check use `TaxonRepository.getUniquePeptides` (pept2taxa).
  * Returns a sorted array.
  */
 export function filterUnique(

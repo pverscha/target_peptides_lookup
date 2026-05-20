@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref, readonly } from 'vue'
-import type { PipelineStep, PipelineStatus, LogEntry } from '@/types'
+import { ref, readonly, computed } from 'vue'
+import type { PipelineStep, PipelineStatus, LogEntry, AnalysisSnapshot } from '@/types'
 import { useConfigStore } from './config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { OpensearchService } from '@/services/OpensearchService'
@@ -48,6 +48,11 @@ export const usePipelineStore = defineStore('pipeline', () => {
   const perTaxonCoreCounts = ref<Record<number, number>>({})
   const lcaByPeptide = ref<Record<string, { id: number; name: string; rank: string }>>({})
 
+  const perTaxonUniqueComputed = ref(false)
+  const uniqueSharedPeptidesComputed = ref(false)
+
+  const _restoredFromHistory = ref(false)
+
   let abortController: AbortController | null = null
 
   function setStep(id: StepId, patch: Partial<PipelineStep>) {
@@ -70,12 +75,15 @@ export const usePipelineStore = defineStore('pipeline', () => {
     perTaxonUniquePeptides.value = {}
     perTaxonCoreCounts.value = {}
     lcaByPeptide.value = {}
+    perTaxonUniqueComputed.value = false
+    uniqueSharedPeptidesComputed.value = false
     steps.value = makeSteps()
   }
 
   async function run(inputTaxaIds: number[]) {
     if (status.value === 'running') return
 
+    _restoredFromHistory.value = false
     resetState()
     abortController = new AbortController()
     const signal = abortController.signal
@@ -84,6 +92,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     const taxonRepo = new TaxonRepository(new UnipeptService({
       unipeptUrl: config.unipeptUrl,
       batchSize: config.batchSize,
+      lcaBatchSize: config.lcaBatchSize,
+      taxaBatchSize: config.taxaBatchSize,
       parallelRequests: config.parallelRequests,
       equateIL: config.equateIL,
     }))
@@ -179,7 +189,9 @@ export const usePipelineStore = defineStore('pipeline', () => {
             }
           }
 
-          for (const p of speciesPeps) taxonUnion.add(p)
+          for (const p of speciesPeps) {
+            if (globalCore === null || globalCore.has(p)) taxonUnion.add(p)
+          }
         }
 
         corePerTaxon.set(taxId, taxonIntersection ?? new Set())
@@ -207,10 +219,13 @@ export const usePipelineStore = defineStore('pipeline', () => {
       }
       perTaxonCoreCounts.value = coreCounts
 
-      // Collect all peptides needing LCA lookup
+      // Collect all peptides needing LCA lookup.
+      // Per-taxon cores are only needed when computing per-taxon unique peptides.
       const allPeptidesForLca = new Set(core)
-      for (const perCore of corePerTaxon.values()) {
-        for (const p of perCore) allPeptidesForLca.add(p)
+      if (config.computePerTaxonUnique) {
+        for (const perCore of corePerTaxon.values()) {
+          for (const p of perCore) allPeptidesForLca.add(p)
+        }
       }
 
       if (allPeptidesForLca.size === 0) {
@@ -228,7 +243,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
       const { lineageByPeptide, lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
         lcaPeptides, signal,
         (done, total) => {
-          const peptidesDone = Math.min(done * config.batchSize, lcaPeptides.length)
+          const peptidesDone = Math.min(done * config.lcaBatchSize, lcaPeptides.length)
           const pct = ((done / total) * 100).toFixed(1)
           setStep('lca', { progress: done / total, detail: `${fmtN(peptidesDone)}/${fmtN(lcaPeptides.length)} peptides (${pct}%)` })
         },
@@ -239,24 +254,57 @@ export const usePipelineStore = defineStore('pipeline', () => {
       setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lineageByPeptide.size)} LCAs retrieved` })
 
       // ── Step 6: Filter ──────────────────────────────────────────────────────
-      setStep('filter', { status: 'running', progress: null, detail: 'Filtering…' })
-      const inputSet = new Set(valid)
+      const doGlobal = config.computeUniqueSharedPeptides
+      const doPerTaxon = config.computePerTaxonUnique
 
-      // Shared unique peptides (global core filtered against all input taxa)
-      const unique = filterUnique(core, lineageByPeptide, inputSet)
-      uniquePeptides.value = unique
+      if (!doGlobal && !doPerTaxon) {
+        setStep('filter', { status: 'skipped', detail: 'Both computations disabled' })
+      } else {
+        setStep('filter', { status: 'running', progress: null, detail: 'Computing…' })
+        const inputSet = new Set(valid)
 
-      // Per-taxon unique peptides (per-taxon core filtered against that taxon only)
-      const perTaxonResult: Record<number, string[]> = {}
-      for (const [tId, perCore] of corePerTaxon) {
-        perTaxonResult[tId] = filterUnique([...perCore], lineageByPeptide, new Set([tId]))
-      }
-      perTaxonUniquePeptides.value = perTaxonResult
+        // Run pept2taxa (network I/O) and per-taxon filterUnique (CPU) concurrently.
+        const globalTask = doGlobal
+          ? taxonRepo.getUniquePeptides(
+              core, inputSet, signal,
+              (done, total) => {
+                const peptidesDone = Math.min(done * config.taxaBatchSize, core.length)
+                const pct = ((done / total) * 100).toFixed(1)
+                setStep('filter', { progress: done / total, detail: `pept2taxa: ${fmtN(peptidesDone)}/${fmtN(core.length)} peptides (${pct}%)` })
+              },
+            )
+          : Promise.resolve(new Set<string>())
 
-      setStep('filter', { status: 'done', progress: 1, detail: `${fmtN(unique.length)} shared unique; per-taxon computed` })
-      addLog('info', `${fmtN(unique.length)} shared unique peptides after filter.`)
-      for (const [tId, peps] of Object.entries(perTaxonResult)) {
-        addLog('info', `${names[Number(tId)] ?? tId}: ${fmtN(peps.length)} unique peptides.`)
+        const perTaxonTask = doPerTaxon
+          ? Promise.resolve(Object.fromEntries(
+              [...corePerTaxon.entries()].map(([tId, perCore]) => [
+                tId,
+                filterUnique([...perCore], lineageByPeptide, new Set([tId])),
+              ]),
+            ) as Record<number, string[]>)
+          : Promise.resolve({} as Record<number, string[]>)
+
+        const [uniqueSet, perTaxonResult] = await Promise.all([globalTask, perTaxonTask])
+
+        if (doGlobal) {
+          const unique = [...uniqueSet].sort()
+          uniquePeptides.value = unique
+          uniqueSharedPeptidesComputed.value = true
+          addLog('info', `${fmtN(unique.length)} shared unique peptides after filter.`)
+        }
+
+        if (doPerTaxon) {
+          perTaxonUniqueComputed.value = true
+          for (const [tId, peps] of Object.entries(perTaxonResult)) {
+            addLog('info', `${names[Number(tId)] ?? tId}: ${fmtN(peps.length)} unique peptides.`)
+          }
+        }
+        perTaxonUniquePeptides.value = perTaxonResult
+
+        const parts: string[] = []
+        if (doGlobal) parts.push(`${fmtN(uniquePeptides.value.length)} shared unique`)
+        if (doPerTaxon) parts.push('per-taxon computed')
+        setStep('filter', { status: 'done', progress: 1, detail: parts.join('; ') })
       }
       status.value = 'done'
 
@@ -286,8 +334,29 @@ export const usePipelineStore = defineStore('pipeline', () => {
 
   function reset() {
     cancel()
+    _restoredFromHistory.value = false
     resetState()
     status.value = 'idle'
+  }
+
+  function loadSaved(snapshot: AnalysisSnapshot) {
+    resetState()
+    _restoredFromHistory.value = true
+    validTaxaIds.value = snapshot.inputTaxonIds
+    taxonNames.value = snapshot.taxonNames
+    descendantIds.value = snapshot.descendantIds
+    descendantsByTaxon.value = snapshot.descendantsByTaxon
+    proteinCounts.value = snapshot.proteinCounts
+    intersectionPeptides.value = snapshot.intersectionPeptides
+    uniquePeptides.value = snapshot.uniquePeptides
+    perTaxonUniquePeptides.value = snapshot.perTaxonUniquePeptides
+    perTaxonCoreCounts.value = snapshot.perTaxonCoreCounts
+    lcaByPeptide.value = snapshot.lcaByPeptide
+    logs.value = snapshot.logs.map((l) => ({ ...l, timestamp: new Date(l.timestamp) }))
+    steps.value = makeSteps().map((s) => ({ ...s, status: 'done', progress: 1 }))
+    perTaxonUniqueComputed.value = true
+    uniqueSharedPeptidesComputed.value = true
+    status.value = 'done'
   }
 
   return {
@@ -304,8 +373,12 @@ export const usePipelineStore = defineStore('pipeline', () => {
     perTaxonUniquePeptides: readonly(perTaxonUniquePeptides),
     perTaxonCoreCounts: readonly(perTaxonCoreCounts),
     lcaByPeptide: readonly(lcaByPeptide),
+    perTaxonUniqueComputed: readonly(perTaxonUniqueComputed),
+    uniqueSharedPeptidesComputed: readonly(uniqueSharedPeptidesComputed),
+    isRestoredSnapshot: readonly(computed(() => _restoredFromHistory.value)),
     run,
     cancel,
     reset,
+    loadSaved,
   }
 })

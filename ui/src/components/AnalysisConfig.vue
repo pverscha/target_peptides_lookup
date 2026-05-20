@@ -101,5 +101,41 @@ const cleavageItems = [
         </template>
       </v-tooltip>
     </div>
+
+    <div class="text-caption text-uppercase text-medium-emphasis font-weight-medium mt-4 mb-1">
+      Computations
+    </div>
+
+    <div class="d-flex align-center mt-1">
+      <v-checkbox
+        v-model="config.computePerTaxonUnique"
+        label="Unique peptides per taxon"
+        color="primary"
+        density="compact"
+        hide-details
+        class="flex-shrink-0"
+      />
+      <v-tooltip text="For each input taxon, determines which of its core peptides are not found in any organism outside that taxon. Uses LCA data — fast." location="right" max-width="240">
+        <template #activator="{ props: tp }">
+          <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="ml-1 text-medium-emphasis" style="cursor: default;" />
+        </template>
+      </v-tooltip>
+    </div>
+
+    <div class="d-flex align-center mt-1">
+      <v-checkbox
+        v-model="config.computeUniqueSharedPeptides"
+        label="Unique shared peptides"
+        color="primary"
+        density="compact"
+        hide-details
+        class="flex-shrink-0"
+      />
+      <v-tooltip text="Determines which shared peptides are exclusive to the selected taxon group by querying pept2taxa. Can be slow for large intersections." location="right" max-width="240">
+        <template #activator="{ props: tp }">
+          <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="ml-1 text-medium-emphasis" style="cursor: default;" />
+        </template>
+      </v-tooltip>
+    </div>
   </div>
 </template>

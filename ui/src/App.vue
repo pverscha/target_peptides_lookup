@@ -10,12 +10,18 @@ import StepCard from './components/StepCard.vue'
 import ResultsPanel from './components/ResultsPanel.vue'
 import LogViewer from './components/LogViewer.vue'
 import { usePipelineStore } from '@/stores/pipeline'
+import { useConfigStore } from '@/stores/config'
+import { useAnalysisHistory } from '@/composables/useAnalysisHistory'
+import AnalysisHistoryPanel from './components/AnalysisHistoryPanel.vue'
 
 const showConfig = ref(false)
+const showHistory = ref(false)
+const { history, loading: historyLoading, saveError, restore, remove } = useAnalysisHistory()
 const logDrawerOpen = ref(true)
 const showSteps = ref(false)
 const taxonInputRef = ref<InstanceType<typeof TaxonInput> | null>(null)
 const pipeline = usePipelineStore()
+const config = useConfigStore()
 
 const { isFinished } = usePipelineStatus()
 
@@ -44,7 +50,7 @@ const selectedTaxaCount = computed(() => taxonInputRef.value?.selectedTaxa?.valu
 function onKeydown(e: KeyboardEvent) {
   if (e.key !== 'Enter') return
   if ((e.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return
-  if (pipeline.status !== 'running') taxonInputRef.value?.runPipeline()
+  if (pipeline.status !== 'running' && config.hasComputationEnabled) taxonInputRef.value?.runPipeline()
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
@@ -59,6 +65,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       </v-app-bar-title>
       <template #append>
         <v-btn
+          icon="mdi-history"
+          variant="text"
+          @click="showHistory = true"
+        />
+        <v-btn
           icon="mdi-cog-outline"
           variant="text"
           @click="showConfig = true"
@@ -67,6 +78,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
     </v-app-bar>
 
     <ConfigPanel v-model="showConfig" />
+    <AnalysisHistoryPanel
+      v-model="showHistory"
+      :history="history"
+      :loading="historyLoading"
+      :save-error="saveError"
+      @restore="(id) => { restore(id); showHistory = false }"
+      @remove="remove"
+    />
 
     <!-- Zone 1: Left permanent drawer -->
     <v-navigation-drawer permanent location="left" :width="340">
@@ -74,20 +93,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <div class="left-drawer-header d-flex align-center px-4 py-3">
         <span class="text-subtitle-2 font-weight-bold mr-auto">Setup</span>
         <div class="d-flex ga-4">
-          <v-tooltip text="Import taxa from file" location="bottom">
-            <template #activator="{ props: tp }">
-              <v-btn
-                v-bind="tp"
-                icon="mdi-file-import-outline"
-                variant="text"
-                density="compact"
-                size="small"
-                :disabled="pipeline.status === 'running'"
-                :loading="taxonInputRef?.fileLoading"
-                @click="taxonInputRef?.triggerFileInput()"
-              />
-            </template>
-          </v-tooltip>
           <v-tooltip text="Reset pipeline" location="bottom">
             <template #activator="{ props: tp }">
               <v-btn
@@ -109,24 +114,34 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <div class="left-drawer-body">
         <AnalysisConfig />
         <v-divider />
-        <TaxonInput ref="taxonInputRef" :hide-buttons="true" />
+        <TaxonInput ref="taxonInputRef" />
       </div>
 
       <!-- Actions (fixed bottom) -->
       <div class="left-drawer-actions pa-3">
         <v-divider class="mb-3" />
 
-        <v-btn
+        <v-tooltip
           v-if="pipeline.status !== 'running'"
-          color="primary"
-          variant="flat"
-          prepend-icon="mdi-play"
-          block
-          class="mb-2"
-          @click="taxonInputRef?.runPipeline()"
+          :text="!config.hasComputationEnabled ? 'Enable at least one computation option above before running.' : ''"
+          :disabled="config.hasComputationEnabled"
+          location="top"
         >
-          Run Pipeline
-        </v-btn>
+          <template #activator="{ props: tp }">
+            <span v-bind="tp" class="d-block mb-2">
+              <v-btn
+                color="primary"
+                variant="flat"
+                prepend-icon="mdi-play"
+                block
+                :disabled="!config.hasComputationEnabled"
+                @click="taxonInputRef?.runPipeline()"
+              >
+                Run Pipeline
+              </v-btn>
+            </span>
+          </template>
+        </v-tooltip>
         <v-btn
           v-else
           color="warning"
@@ -292,7 +307,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
     </v-navigation-drawer>
 
     <!-- Zone 2: Main content -->
-    <v-main scrollable>
+    <v-main scrollable class="main-content">
       <v-container fluid class="pt-0">
         <ResultsPanel />
       </v-container>
@@ -340,6 +355,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
 .right-drawer-footer {
   flex-shrink: 0;
+}
+
+.main-content :deep(.v-main__wrap) {
+  background-color: #F5F5F5;
 }
 
 .log-collapsed-label {

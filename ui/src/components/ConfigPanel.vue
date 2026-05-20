@@ -46,7 +46,27 @@ const config = useConfigStore()
       />
       <v-text-field
         v-model.number="config.batchSize"
-        label="Batch size"
+        label="taxonomy batch size"
+        type="number"
+        :min="1"
+        :max="1000"
+        density="compact"
+        variant="outlined"
+        class="mb-3"
+      />
+      <v-text-field
+        v-model.number="config.lcaBatchSize"
+        label="pept2lca batch size"
+        type="number"
+        :min="1"
+        :max="1000"
+        density="compact"
+        variant="outlined"
+        class="mb-3"
+      />
+      <v-text-field
+        v-model.number="config.taxaBatchSize"
+        label="pept2taxa batch size"
         type="number"
         :min="1"
         :max="1000"
