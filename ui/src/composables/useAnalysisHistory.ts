@@ -1,10 +1,12 @@
 import { ref, watch } from 'vue'
 import { usePipelineStore } from '@/stores/pipeline'
-import { saveAnalysis, listAnalyses, loadAnalysis, deleteAnalysis } from '@/services/HistoryService'
+import { useConfigStore } from '@/stores/config'
+import { saveAnalysis, listAnalyses, loadAnalysis, deleteAnalysis, renameAnalysis } from '@/services/HistoryService'
 import type { AnalysisSummary } from '@/types'
 
 export function useAnalysisHistory() {
   const pipeline = usePipelineStore()
+  const config = useConfigStore()
   const history = ref<AnalysisSummary[]>([])
   const loading = ref(false)
   const saveError = ref<string | null>(null)
@@ -29,6 +31,11 @@ export function useAnalysisHistory() {
     history.value = history.value.filter((h) => h.id !== id)
   }
 
+  async function rename(id: number, name: string) {
+    await renameAnalysis(id, name)
+    history.value = history.value.map((h) => h.id === id ? { ...h, name } : h)
+  }
+
   watch(
     () => pipeline.status,
     async (newStatus) => {
@@ -39,7 +46,17 @@ export function useAnalysisHistory() {
         // passing to IndexedDB's structured clone algorithm.
         const snapshot = JSON.parse(JSON.stringify({
           savedAt: new Date().toISOString(),
+          inputTaxa: pipeline.inputTaxa,
           inputTaxonIds: pipeline.validTaxaIds,
+          analysisConfig: {
+            minLength: config.minLength,
+            equateIL: config.equateIL,
+            cleavageMethod: config.cleavageMethod,
+            cleavageRegex: config.cleavageRegex,
+            minProteins: config.minProteins,
+            computePerTaxonUnique: config.computePerTaxonUnique,
+            computeUniqueSharedPeptides: config.computeUniqueSharedPeptides,
+          },
           taxonNames: pipeline.taxonNames,
           descendantIds: pipeline.descendantIds,
           descendantsByTaxon: pipeline.descendantsByTaxon,
@@ -65,5 +82,5 @@ export function useAnalysisHistory() {
 
   refresh()
 
-  return { history, loading, saveError, refresh, restore, remove }
+  return { history, loading, saveError, refresh, restore, remove, rename }
 }

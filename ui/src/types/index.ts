@@ -54,10 +54,23 @@ export interface TaxonSuggestion {
   rank: string
 }
 
+export interface AnalysisParams {
+  minLength: number
+  equateIL: boolean
+  cleavageMethod: 'tryptic' | 'custom'
+  cleavageRegex: string
+  minProteins: number
+  computePerTaxonUnique: boolean
+  computeUniqueSharedPeptides: boolean
+}
+
 export interface AnalysisSnapshot {
   id?: number
+  name?: string
   savedAt: string
   inputTaxonIds: number[]
+  inputTaxa?: TaxonSuggestion[]
+  analysisConfig?: AnalysisParams
   taxonNames: Record<number, string>
   descendantIds: number[]
   descendantsByTaxon: Record<number, number[]>
@@ -72,6 +85,7 @@ export interface AnalysisSnapshot {
 
 export interface AnalysisSummary {
   id: number
+  name?: string
   savedAt: string
   inputTaxonNames: string[]
   inputTaxonCount: number

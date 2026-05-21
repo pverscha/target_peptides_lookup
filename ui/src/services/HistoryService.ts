@@ -9,6 +9,7 @@ export async function listAnalyses(): Promise<AnalysisSummary[]> {
   const rows = await db.analyses.orderBy('savedAt').reverse().toArray()
   return rows.map((row) => ({
     id: row.id!,
+    name: row.name,
     savedAt: row.savedAt,
     inputTaxonNames: Object.values(row.taxonNames),
     inputTaxonCount: row.inputTaxonIds.length,
@@ -23,4 +24,8 @@ export async function loadAnalysis(id: number): Promise<AnalysisSnapshot | undef
 
 export async function deleteAnalysis(id: number): Promise<void> {
   return db.analyses.delete(id)
+}
+
+export async function renameAnalysis(id: number, name: string): Promise<void> {
+  await db.analyses.update(id, { name })
 }

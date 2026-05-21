@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
-import type { Config } from '@/types'
+import type { Config, AnalysisParams } from '@/types'
 
 const STORAGE_KEY = 'tpi_config'
 
@@ -90,5 +90,15 @@ export const useConfigStore = defineStore('config', () => {
 
   const hasComputationEnabled = computed(() => computePerTaxonUnique.value || computeUniqueSharedPeptides.value)
 
-  return { unipeptUrl, opensearchUrl, opensearchIndex, batchSize, lcaBatchSize, taxaBatchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins, computePerTaxonUnique, computeUniqueSharedPeptides, hasComputationEnabled, resetToDefaults }
+  function applyAnalysisParams(params: AnalysisParams) {
+    minLength.value = params.minLength
+    equateIL.value = params.equateIL
+    cleavageMethod.value = params.cleavageMethod
+    cleavageRegex.value = params.cleavageRegex
+    minProteins.value = params.minProteins
+    computePerTaxonUnique.value = params.computePerTaxonUnique
+    computeUniqueSharedPeptides.value = params.computeUniqueSharedPeptides
+  }
+
+  return { unipeptUrl, opensearchUrl, opensearchIndex, batchSize, lcaBatchSize, taxaBatchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex, minProteins, computePerTaxonUnique, computeUniqueSharedPeptides, hasComputationEnabled, resetToDefaults, applyAnalysisParams }
 })

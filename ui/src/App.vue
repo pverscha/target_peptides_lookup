@@ -16,7 +16,7 @@ import AnalysisHistoryPanel from './components/AnalysisHistoryPanel.vue'
 
 const showConfig = ref(false)
 const showHistory = ref(false)
-const { history, loading: historyLoading, saveError, restore, remove } = useAnalysisHistory()
+const { history, loading: historyLoading, saveError, restore, remove, rename } = useAnalysisHistory()
 const logDrawerOpen = ref(true)
 const showSteps = ref(false)
 const taxonInputRef = ref<InstanceType<typeof TaxonInput> | null>(null)
@@ -85,6 +85,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       :save-error="saveError"
       @restore="(id) => { restore(id); showHistory = false }"
       @remove="remove"
+      @rename="rename"
     />
 
     <!-- Zone 1: Left permanent drawer -->

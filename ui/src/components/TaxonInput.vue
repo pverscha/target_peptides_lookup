@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { usePipelineStore } from '@/stores/pipeline'
 import { useConfigStore } from '@/stores/config'
 import { parseTaxonInput } from '@/utils/peptides'
@@ -85,8 +85,12 @@ function runPipeline() {
     return
   }
   inputErrors.value = []
-  void pipeline.run(selectedTaxa.value.map((t) => t.id))
+  void pipeline.run(selectedTaxa.value)
 }
+
+watch(() => pipeline.isRestoredSnapshot, (restored) => {
+  if (restored) selectedTaxa.value = [...pipeline.inputTaxa]
+})
 
 defineExpose({ runPipeline, selectedTaxa })
 </script>

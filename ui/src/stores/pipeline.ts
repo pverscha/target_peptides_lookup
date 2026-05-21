@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, readonly, computed } from 'vue'
-import type { PipelineStep, PipelineStatus, LogEntry, AnalysisSnapshot } from '@/types'
+import type { PipelineStep, PipelineStatus, LogEntry, AnalysisSnapshot, TaxonSuggestion } from '@/types'
 import { useConfigStore } from './config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { OpensearchService } from '@/services/OpensearchService'
@@ -38,6 +38,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
   const steps = ref<PipelineStep[]>(makeSteps())
   const logs = ref<LogEntry[]>([])
 
+  const inputTaxa = ref<TaxonSuggestion[]>([])
   const validTaxaIds = ref<number[]>([])
   const taxonNames = ref<Record<number, string>>({})
   const descendantIds = ref<number[]>([])
@@ -66,6 +67,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
 
   function resetState() {
     logs.value = []
+    inputTaxa.value = []
     validTaxaIds.value = []
     taxonNames.value = {}
     descendantIds.value = []
@@ -81,11 +83,13 @@ export const usePipelineStore = defineStore('pipeline', () => {
     steps.value = makeSteps()
   }
 
-  async function run(inputTaxaIds: number[]) {
+  async function run(taxa: TaxonSuggestion[]) {
     if (status.value === 'running') return
 
     _restoredFromHistory.value = false
     resetState()
+    inputTaxa.value = taxa
+    const inputTaxaIds = taxa.map((t) => t.id)
     abortController = new AbortController()
     const signal = abortController.signal
     status.value = 'running'
@@ -343,6 +347,10 @@ export const usePipelineStore = defineStore('pipeline', () => {
   function loadSaved(snapshot: AnalysisSnapshot) {
     resetState()
     _restoredFromHistory.value = true
+    inputTaxa.value = snapshot.inputTaxa ?? []
+    if (snapshot.analysisConfig) {
+      config.applyAnalysisParams(snapshot.analysisConfig)
+    }
     validTaxaIds.value = snapshot.inputTaxonIds
     taxonNames.value = snapshot.taxonNames
     descendantIds.value = snapshot.descendantIds
@@ -364,6 +372,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
     status: readonly(status),
     steps: readonly(steps),
     logs: readonly(logs),
+    inputTaxa: readonly(inputTaxa),
     validTaxaIds: readonly(validTaxaIds),
     taxonNames: readonly(taxonNames),
     descendantIds: readonly(descendantIds),
