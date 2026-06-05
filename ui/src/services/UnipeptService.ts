@@ -1,5 +1,5 @@
 import type { UnipeptConfig, TaxonSuggestion } from '@/types'
-import { chunked, LINEAGE_ID_FIELDS } from '@/utils/peptides'
+import {chunked, LINEAGE_ID_FIELDS} from '@/utils/peptides'
 
 interface TaxonEntry {
   taxon_id: number
@@ -172,70 +172,42 @@ export class UnipeptService {
     return { lineageByPeptide, lcaByPeptide }
   }
 
-  async lookupTaxa(
-    peptides: string[],
-    inputTaxonSet: Set<number>,
+  async computeSharedPeptides(
+    taxonIds: number[],
+    cleavageRegex: string,
+    minLength: number,
     signal: AbortSignal,
-    onProgress?: (done: number, total: number) => void,
-  ): Promise<Set<string>> {
-    const unique = new Set<string>()
-    const chunks = chunked(peptides, this.config.taxaBatchSize)
-    const total = chunks.length
-    let completedChunks = 0
-    let nextIdx = 0
+  ): Promise<string[]> {
+    const res = await this.fetchWithRetry(
+      `${this.config.unipeptUrl}/private_api/taxa/shared_peptides`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taxon_ids: taxonIds, cleavage_regex: cleavageRegex, min_length: minLength }),
+      },
+      signal,
+    )
+    const data: { shared_peptides: string[] } = await res.json()
+    return data.shared_peptides
+  }
 
-    const processChunk = async (chunk: string[]): Promise<void> => {
-      const params = new URLSearchParams()
-      for (const pep of chunk) params.append('input[]', pep)
-      params.append('equate_il', String(this.config.equateIL))
-      params.append('extra', 'true')
-
-      const res = await this.fetchWithRetry(
-        `${this.config.unipeptUrl}/api/v2/pept2taxa.json`,
-        { method: 'POST', body: params },
-        signal,
-      )
-      const data: LcaEntry[] = await res.json()
-
-      // Single pass: track which peptides have at least one non-covered organism.
-      // seenPeptides and chunkNotUnique are local to this call and GC'd after it returns.
-      const seenPeptides = new Set<string>()
-      const chunkNotUnique = new Set<string>()
-
-      for (const entry of data) {
-        seenPeptides.add(entry.peptide)
-        if (chunkNotUnique.has(entry.peptide)) continue
-
-        let covered = inputTaxonSet.has(entry.taxon_id)
-        if (!covered) {
-          for (const field of LINEAGE_ID_FIELDS) {
-            const v = entry[field]
-            if (v !== null && v !== undefined && v !== 0 && inputTaxonSet.has(v as number)) {
-              covered = true
-              break
-            }
-          }
-        }
-        if (!covered) chunkNotUnique.add(entry.peptide)
-      }
-
-      for (const pep of chunk) {
-        if (seenPeptides.has(pep) && !chunkNotUnique.has(pep)) unique.add(pep)
-      }
-
-      completedChunks++
-      onProgress?.(completedChunks, total)
-    }
-
-    const worker = async (): Promise<void> => {
-      let idx: number
-      while ((idx = nextIdx++) < chunks.length) {
-        await processChunk(chunks[idx]!)
-      }
-    }
-
-    await Promise.all(Array.from({ length: Math.min(this.config.parallelRequests, chunks.length) }, worker))
-    return unique
+  async computeUniquePeptides(
+    taxonId: number,
+    cleavageRegex: string,
+    minLength: number,
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    const res = await this.fetchWithRetry(
+      `${this.config.unipeptUrl}/private_api/taxa/unique_peptides`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taxon_id: taxonId, cleavage_regex: cleavageRegex, min_length: minLength }),
+      },
+      signal,
+    )
+    const data: { unique_peptides: string[]; total_peptides: number; total_unique_peptides: number } = await res.json()
+    return data.unique_peptides
   }
 
   async searchTaxa(
@@ -252,12 +224,12 @@ export class UnipeptService {
       signal,
     )
     if (ids.length === 0) return []
-    const raw: Array<{ id: number; name: string; rank: string }> = await this.postJson(
+    const raw: Array<{ id: number; name: string; rank: string; protein_count?: number }> = await this.postJson(
       `${this.config.unipeptUrl}/private_api/taxa`,
-      { taxids: ids },
+      { taxids: ids, report_protein_count: true },
       signal,
     )
-    return raw.map((r) => ({ id: r.id, name: r.name, rank: r.rank }))
+    return raw.map((r) => ({ id: r.id, name: r.name, rank: r.rank, proteinCount: r.protein_count }))
   }
 
   async countTaxa(query: string, signal: AbortSignal): Promise<number> {

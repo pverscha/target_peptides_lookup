@@ -28,7 +28,6 @@ function makeRepo(): TaxonRepository {
     unipeptUrl: config.unipeptUrl,
     batchSize: config.batchSize,
     lcaBatchSize: config.lcaBatchSize,
-    taxaBatchSize: config.taxaBatchSize,
     parallelRequests: config.parallelRequests,
     equateIL: config.equateIL,
   }))

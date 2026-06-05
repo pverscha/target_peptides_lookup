@@ -93,11 +93,14 @@ export function parseTaxonInput(raw: string): { ids: number[]; errors: string[] 
   return { ids, errors }
 }
 
-/**
- * Compute the set intersection of two Sets.
- */
 export function intersectSets<T>(a: Set<T>, b: Set<T>): Set<T> {
   const result = new Set<T>()
   for (const v of a) if (b.has(v)) result.add(v)
+  return result
+}
+
+export function unionSets<T>(sets: Iterable<Set<T>>): Set<T> {
+  const result = new Set<T>()
+  for (const s of sets) for (const v of s) result.add(v)
   return result
 }

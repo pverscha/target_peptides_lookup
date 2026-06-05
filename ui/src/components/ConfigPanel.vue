@@ -31,20 +31,6 @@ const config = useConfigStore()
         class="mb-3"
       />
       <v-text-field
-        v-model="config.opensearchUrl"
-        label="OpenSearch URL"
-        density="compact"
-        variant="outlined"
-        class="mb-3"
-      />
-      <v-text-field
-        v-model="config.opensearchIndex"
-        label="OpenSearch index"
-        density="compact"
-        variant="outlined"
-        class="mb-3"
-      />
-      <v-text-field
         v-model.number="config.batchSize"
         label="taxonomy batch size"
         type="number"
@@ -57,16 +43,6 @@ const config = useConfigStore()
       <v-text-field
         v-model.number="config.lcaBatchSize"
         label="pept2lca batch size"
-        type="number"
-        :min="1"
-        :max="1000"
-        density="compact"
-        variant="outlined"
-        class="mb-3"
-      />
-      <v-text-field
-        v-model.number="config.taxaBatchSize"
-        label="pept2taxa batch size"
         type="number"
         :min="1"
         :max="1000"

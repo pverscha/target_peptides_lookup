@@ -3,21 +3,19 @@ import { ref, readonly, computed } from 'vue'
 import type { PipelineStep, PipelineStatus, LogEntry, AnalysisSnapshot, TaxonSuggestion } from '@/types'
 import { useConfigStore } from './config'
 import { UnipeptService } from '@/services/UnipeptService'
-import { OpensearchService } from '@/services/OpensearchService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
-import { ProteinRepository } from '@/repositories/ProteinRepository'
-import { digestProtein, filterUnique, intersectSets, TRYPSIN_RE } from '@/utils/peptides'
+import { chunked, intersectSets, unionSets } from '@/utils/peptides'
 import { fmtN, formatLogLines } from '@/utils/format'
 import { downloadText } from '@/utils/download'
 import { isAbortError } from '@/utils/abort'
 
 const LOG_UI_LIMIT = 100
+const SHARED_PEPTIDES_BATCH_SIZE = 20
 
 const STEP_DEFS = [
   { id: 'validate',    label: 'Validate taxon IDs' },
   { id: 'descendants', label: 'Collect species-level descendants' },
-  { id: 'count',       label: 'Count proteins per taxon' },
-  { id: 'intersect',   label: 'Digest and intersect peptides' },
+  { id: 'intersect',   label: 'Compute shared peptides' },
   { id: 'lca',         label: 'Look up LCAs' },
   { id: 'filter',      label: 'Apply uniqueness filter' },
 ] as const
@@ -53,30 +51,18 @@ export const usePipelineStore = defineStore('pipeline', () => {
   // Display name for each validated taxon ID (id → name).
   const taxonNames = ref<Record<number, string>>({})
   // Flat list of every unique species-level descendant across all valid input taxa.
-  // A single higher-rank taxon (e.g. a mammalian order) can contribute thousands of species.
   const descendantIds = ref<number[]>([])
   // Maps each input taxon ID to the list of its species-level descendants.
-  // descendantIds is the deduplicated union of all these lists.
   const descendantsByTaxon = ref<Record<number, number[]>>({})
-  // Number of proteins indexed in OpenSearch for each species-level descendant taxon.
-  // Used to exclude taxa below the minimum protein threshold before intersection.
-  const proteinCounts = ref<Record<number, number>>({})
-  // The global core peptidome: peptides present in the intersection across ALL input taxa.
-  // Computed by digesting every protein for every descendant species and intersecting the
-  // resulting peptide sets up the taxon hierarchy.
+  // The global core peptidome: peptides shared across ALL species descendants of ALL input taxa.
   const intersectionPeptides = ref<string[]>([])
-  // Subset of intersectionPeptides that are unique to the input taxon group: their LCA
-  // lineage (according to pept2taxa) does not include any taxon outside the input set.
+  // Subset of intersectionPeptides that are globally unique (no organism outside the input
+  // taxon set in the entire Unipept database has this peptide).
   const uniquePeptides = ref<string[]>([])
-  // Per-taxon unique peptides: for each input taxon, the peptides from its own per-taxon
-  // core (intersection across its descendants only) whose LCA lineage falls within that
-  // single taxon. Populated only when computePerTaxonUnique is enabled.
+  // Per-taxon unique peptides: for each input taxon, the subset of intersectionPeptides that
+  // are globally unique to at least one species descendant of that taxon.
   const perTaxonUniquePeptides = ref<Record<number, string[]>>({})
-  // Number of peptides in each input taxon's per-taxon core before the uniqueness filter.
-  // Useful for understanding how much of the per-taxon core survives filtering.
-  const perTaxonCoreCounts = ref<Record<number, number>>({})
-  // LCA metadata for every peptide that was submitted to pept2lca. Keyed by peptide
-  // sequence; covers both intersectionPeptides and per-taxon core peptides (when enabled).
+  // LCA metadata for every peptide submitted to pept2lca, keyed by peptide sequence.
   const lcaByPeptide = ref<Record<string, { id: number; name: string; rank: string }>>({})
 
   const perTaxonUniqueComputed = ref(false)
@@ -109,11 +95,9 @@ export const usePipelineStore = defineStore('pipeline', () => {
     taxonNames.value = {}
     descendantIds.value = []
     descendantsByTaxon.value = {}
-    proteinCounts.value = {}
     intersectionPeptides.value = []
     uniquePeptides.value = []
     perTaxonUniquePeptides.value = {}
-    perTaxonCoreCounts.value = {}
     lcaByPeptide.value = {}
     perTaxonUniqueComputed.value = false
     uniqueSharedPeptidesComputed.value = false
@@ -135,21 +119,14 @@ export const usePipelineStore = defineStore('pipeline', () => {
       unipeptUrl: config.unipeptUrl,
       batchSize: config.batchSize,
       lcaBatchSize: config.lcaBatchSize,
-      taxaBatchSize: config.taxaBatchSize,
       parallelRequests: config.parallelRequests,
       equateIL: config.equateIL,
     }))
-    const proteinRepo = new ProteinRepository(new OpensearchService({
-      opensearchUrl: config.opensearchUrl,
-      opensearchIndex: config.opensearchIndex,
-    }))
+
+    const cleavageRegex = config.cleavageMethod === 'tryptic' ? '[KR](?!P)' : config.cleavageRegex
 
     try {
       // ── Step 1: Validate ────────────────────────────────────────────────────
-      // Sends the user-supplied taxon IDs to Unipept's taxonomy API in batches.
-      // IDs that are not present in the NCBI taxonomy are flagged as warnings and
-      // excluded from all subsequent steps. The validated IDs and their display
-      // names are stored so later steps can resolve taxon IDs to human-readable names.
       setStep('validate', { status: 'running', progress: null, detail: `Checking ${fmtN(inputTaxaIds.length)} IDs…` })
       const { valid, invalid, names } = await taxonRepo.validate(
         inputTaxaIds, signal,
@@ -162,12 +139,6 @@ export const usePipelineStore = defineStore('pipeline', () => {
       setStep('validate', { status: 'done', progress: 1, detail: `${fmtN(valid.length)}/${fmtN(inputTaxaIds.length)} valid` })
 
       // ── Step 2: Descendants ─────────────────────────────────────────────────
-      // Expands each validated input taxon to all of its species-level descendants
-      // using Unipept's taxonomy API. Higher-rank taxa (genera, families, orders, …)
-      // are not used directly for protein lookup; only species are queried against
-      // OpenSearch in later steps. The flat list (descendants) is the deduplicated
-      // union across all input taxa; byTaxon keeps the per-taxon mapping so the
-      // intersection step can group species back to their parent input taxon.
       setStep('descendants', { status: 'running', progress: null, detail: 'Fetching…' })
       const { descendants, byTaxon, warnings: descWarnings } = await taxonRepo.getDescendants(
         valid, signal,
@@ -180,133 +151,35 @@ export const usePipelineStore = defineStore('pipeline', () => {
       setStep('descendants', { status: 'done', progress: 1, detail: `${fmtN(descendants.length)} species` })
       addLog('info', `Collected ${fmtN(descendants.length)} unique species-level descendants.`)
 
-      // ── Step 3: Count proteins ──────────────────────────────────────────────
-      // Issues aggregation queries to OpenSearch to count how many proteins are
-      // indexed for each species-level descendant. Species below the configured
-      // minimum protein threshold (config.minProteins) are excluded from the
-      // intersection step; they are too sparsely represented to produce meaningful
-      // shared peptides and would collapse the intersection to empty.
-      // `populated` is the set of species that pass this threshold.
-      setStep('count', { status: 'running', progress: null, detail: 'Querying aggregations…' })
-      const counts = await proteinRepo.countByTaxon(
-        descendants, signal,
-        (done, total) => setStep('count', { progress: done / total, detail: `${fmtN(done)}/${fmtN(total)} chunks` }),
-      )
-      proteinCounts.value = counts
-      const populated = new Set(descendants.filter((t) => (counts[t] ?? 0) >= config.minProteins))
-      const excluded = descendants.filter((t) => (counts[t] ?? 0) < config.minProteins)
-      for (const t of excluded) addLog('warning', `Excluded from intersection (fewer than ${config.minProteins} protein(s) in OpenSearch): ${t}`)
-      if (excluded.length > 0) addLog('info', `${fmtN(excluded.length)} of ${fmtN(descendants.length)} descendant taxa excluded (below minimum protein threshold).`)
-      if (populated.size === 0) throw new Error('No descendant taxa meet the minimum protein threshold.')
-      setStep('count', { status: 'done', progress: 1, detail: `${fmtN(populated.size)} taxa with proteins` })
+      // ── Step 3: Compute shared peptides ─────────────────────────────────────
+      // Sends species-level descendant IDs in batches of SHARED_PEPTIDES_BATCH_SIZE
+      // to the shared_peptides endpoint. The server digests proteins and computes the
+      // peptide intersection. The batch results are intersected client-side to obtain
+      // the global core peptidome. This is mathematically equivalent to a single call
+      // with all IDs because shared(A ∪ B) = shared(A) ∩ shared(B).
+      setStep('intersect', { status: 'running', progress: null, detail: 'Requesting shared peptides…' })
+      const batches = chunked(descendants, SHARED_PEPTIDES_BATCH_SIZE)
+      let batchesDone = 0
+      let nextBatchIdx = 0
+      const batchSets: Set<string>[] = new Array(batches.length)
 
-
-
-      // ── Step 4: Intersect ───────────────────────────────────────────────────
-      // This is the most compute- and memory-intensive step. For each input taxon,
-      // proteins are streamed from OpenSearch and digested in silico into peptides.
-      // Two levels of intersection are maintained simultaneously:
-      //
-      //   taxonIntersection — running intersection of peptide sets across the
-      //     species descendants of one input taxon. Starts as the first species'
-      //     full peptide set and shrinks with each additional species. Represents
-      //     the "per-taxon core": peptides shared by every species under that taxon.
-      //     Species are processed in ascending protein-count order so the smallest
-      //     (most restrictive) sets prune the intersection early.
-      //
-      //   taxonUnion — union of all species peptides (for a given input taxon)
-      //     that are already in the current globalCore candidate. This acts as a
-      //     filter: only peptides that could still survive the global intersection
-      //     are accumulated, keeping this set much smaller than a full union.
-      //
-      //   globalCore — running intersection across all input taxa of their
-      //     respective taxonUnions. After all taxa are processed this holds the
-      //     global core peptidome: peptides present in every input taxon group.
-      //
-      //   corePerTaxon — the final taxonIntersection for each input taxon, kept
-      //     alive until Step 6 for per-taxon unique peptide computation.
-      //
-      // Note: speciesPeps is the largest transient allocation — it holds every
-      // distinct digested peptide from one species and is GC'd after the
-      // intersection for that species is computed.
-      setStep('intersect', { status: 'running', progress: null, detail: 'Starting…' })
-      const totalProteins = [...populated].reduce((s, t) => s + (counts[t] ?? 0), 0)
-      let processed = 0
-
-      const cleavageRe =
-        config.cleavageMethod === 'tryptic'
-          ? TRYPSIN_RE
-          : new RegExp(config.cleavageRegex, 'g')
-
-      // Holds the per-taxon core peptide set for each input taxon.
-      // All entries remain live until perTaxonTask in Step 6 consumes them.
-      const corePerTaxon = new Map<number, Set<string>>()
-      let globalCore: Set<string> | null = null
-
-      for (const taxId of valid) {
-        if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
-
-        // Sort by ascending protein count so the smallest (most restrictive)
-        // species is processed first, pruning taxonIntersection early.
-        const taxDescendants = (byTaxon[taxId] ?? [])
-          .filter((d) => populated.has(d))
-          .sort((a, b) => (counts[a] ?? 0) - (counts[b] ?? 0))
-
-        // Running intersection across this taxon's descendants.
-        // null = not yet initialised (first species sets it).
-        let taxonIntersection: Set<string> | null = null
-        // Union of peptides from this taxon's descendants that survive the current
-        // globalCore filter. Used to update globalCore after all descendants are processed.
-        const taxonUnion = new Set<string>()
-        // Guard flag: once the intersection empties we stop updating it but still
-        // need to continue iterating to populate taxonUnion for globalCore.
-        let intersectionEmptied = false
-
-        for (const descId of taxDescendants) {
-          if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
-          // All unique peptides produced by digesting this species' proteins.
-          // Peak allocation: can reach hundreds of thousands of entries for
-          // protein-rich species. GC-eligible once intersectSets returns below.
-          const speciesPeps = new Set<string>()
-
-          for await (const seq of proteinRepo.streamSequences(descId, signal)) {
-            digestProtein(seq, config.equateIL, config.minLength, speciesPeps, cleavageRe)
-            processed++
-            if (processed % 200 === 0) {
-              setStep('intersect', {
-                progress: processed / totalProteins,
-                detail: `${fmtN(processed)}/${fmtN(totalProteins)} proteins (taxon ${taxId})`,
-              })
-            }
-          }
-
-          if (!intersectionEmptied) {
-            taxonIntersection = taxonIntersection === null ? speciesPeps : intersectSets(taxonIntersection, speciesPeps)
-            if (taxonIntersection.size === 0) {
-              addLog('warning', `Running intersection became empty for taxon ${taxId} after processing ${descId}.`)
-              intersectionEmptied = true
-            }
-          }
-
-          // Only add peptides that are already candidates for globalCore.
-          // This avoids accumulating the full per-species union, which would be
-          // much larger and would not affect the final result.
-          for (const p of speciesPeps) {
-            if (globalCore === null || globalCore.has(p)) taxonUnion.add(p)
-          }
-        }
-
-        corePerTaxon.set(taxId, taxonIntersection ?? new Set())
-
-        globalCore = globalCore === null ? taxonUnion : intersectSets(globalCore, taxonUnion)
-
-        if (globalCore.size === 0) {
-          addLog('warning', `Global intersection became empty after processing taxon ${taxId}.`)
-          break
+      const sharedWorker = async (): Promise<void> => {
+        let idx: number
+        while ((idx = nextBatchIdx++) < batches.length) {
+          const peps = await taxonRepo.getSharedPeptides(batches[idx]!, cleavageRegex, config.minLength, signal)
+          batchSets[idx] = new Set<string>(peps)
+          batchesDone++
+          setStep('intersect', {
+            progress: batchesDone / batches.length,
+            detail: `Batch ${fmtN(batchesDone)}/${fmtN(batches.length)}`,
+          })
         }
       }
 
-      const core = [...(globalCore ?? new Set())]
+      const sharedWorkerCount = Math.min(config.parallelRequests, batches.length)
+      await Promise.all(Array.from({ length: sharedWorkerCount }, sharedWorker))
+      const globalCore: Set<string> = batchSets.reduce((a, b) => intersectSets(a, b))
+      const core: string[] = [...globalCore].sort()
       intersectionPeptides.value = core
       setStep('intersect', {
         status: 'done',
@@ -314,25 +187,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
         detail: core.length === 0 ? 'No shared peptides' : `${fmtN(core.length)} shared peptides`,
       })
       addLog('info', `Global core peptidome size: ${fmtN(core.length)}`)
-      const coreCounts: Record<number, number> = {}
-      for (const [tId, perCore] of corePerTaxon) {
-        coreCounts[tId] = perCore.size
-        addLog('info', `Per-taxon core for ${names[tId] ?? tId}: ${fmtN(perCore.size)} peptides`)
-      }
-      perTaxonCoreCounts.value = coreCounts
 
-      // Build the union of all peptides that need LCA resolution. The global core
-      // always needs LCA lookup. Per-taxon cores add extra peptides only when
-      // per-taxon unique peptide computation is enabled, because per-taxon cores
-      // are typically larger than (and not a subset of) the global core.
-      const allPeptidesForLca = new Set(core)
-      if (config.computePerTaxonUnique) {
-        for (const perCore of corePerTaxon.values()) {
-          for (const p of perCore) allPeptidesForLca.add(p)
-        }
-      }
-
-      if (allPeptidesForLca.size === 0) {
+      if (core.length === 0) {
         addLog('info', 'No peptides to look up — nothing to report.')
         for (const id of ['lca', 'filter'] as StepId[]) {
           setStep(id, { status: 'skipped', detail: 'Skipped — empty intersection' })
@@ -341,53 +197,27 @@ export const usePipelineStore = defineStore('pipeline', () => {
         return
       }
 
-      // ── Step 5: LCA lookup ──────────────────────────────────────────────────
-      // Queries Unipept's pept2lca endpoint for every candidate peptide. Two
-      // data structures are returned:
-      //
-      //   lineageByPeptide — maps each peptide to the set of all NCBI taxon IDs
-      //     in its full lineage (from domain down to species). Used in Step 6 to
-      //     determine whether a peptide is unique to the input taxon group without
-      //     a second network call. Held live until filterUnique returns in Step 6.
-      //
-      //   lcaMap — maps each peptide to its direct LCA (id, name, rank). This is
-      //     a compact subset of lineageByPeptide and is persisted in the store as
-      //     lcaByPeptide for display in the results panel.
-      const lcaPeptides = [...allPeptidesForLca]
+      // ── Step 4: LCA lookup ──────────────────────────────────────────────────
       setStep('lca', { status: 'running', progress: null, detail: 'Querying Unipept pept2lca…' })
-      const { lineageByPeptide, lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
-        lcaPeptides, signal,
+      const { lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
+        core, signal,
         (done, total) => {
-          const peptidesDone = Math.min(done * config.lcaBatchSize, lcaPeptides.length)
+          const peptidesDone = Math.min(done * config.lcaBatchSize, core.length)
           const pct = ((done / total) * 100).toFixed(1)
-          setStep('lca', { progress: done / total, detail: `${fmtN(peptidesDone)}/${fmtN(lcaPeptides.length)} peptides (${pct}%)` })
+          setStep('lca', { progress: done / total, detail: `${fmtN(peptidesDone)}/${fmtN(core.length)} peptides (${pct}%)` })
         },
       )
-      const missing = lcaPeptides.filter((p) => !lineageByPeptide.has(p))
+      const missing = core.filter((p) => !lcaMap.has(p))
       for (const p of missing) addLog('warning', `No LCA returned for peptide: ${p}`)
       lcaByPeptide.value = Object.fromEntries(lcaMap)
-      setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lineageByPeptide.size)} LCAs retrieved` })
+      setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lcaMap.size)} LCAs retrieved` })
 
-      // ── Step 6: Filter ──────────────────────────────────────────────────────
-      // Applies the uniqueness filter to remove peptides that are not exclusive
-      // to the input taxon group. Two modes are supported and can run concurrently:
-      //
-      //   globalTask — queries Unipept's pept2taxa endpoint for every peptide in
-      //     the global core. A peptide is considered unique if every organism that
-      //     contains it falls within the input taxon set (i.e. no hit outside the
-      //     group). This is a network-bound operation.
-      //
-      //   perTaxonTask — for each input taxon, filters its per-taxon core using
-      //     the lineageByPeptide map from Step 5 (no additional network calls).
-      //     A peptide is unique to a taxon if the taxon's ID appears somewhere in
-      //     the peptide's LCA lineage. This is CPU-bound and runs synchronously
-      //     via filterUnique. Note: this single-taxon check is an approximation;
-      //     the global uniqueness check (pept2taxa) is more accurate for multi-
-      //     taxon input sets.
-      //
-      // Both tasks are launched with Promise.all so the network I/O and CPU work
-      // overlap. lineageByPeptide (from Step 5) is consumed here and becomes
-      // eligible for GC once perTaxonTask resolves.
+      // ── Step 5: Uniqueness filter ───────────────────────────────────────────
+      // Uses the unique_peptides endpoint to determine which peptides are globally
+      // unique to at least one species descendant. One request is issued per species,
+      // parallelised via a worker pool. The results are shared between the global
+      // unique computation (union across all species) and the per-taxon computation
+      // (union across each taxon's own descendants), avoiding redundant API calls.
       const doGlobal = config.computeUniqueSharedPeptides
       const doPerTaxon = config.computePerTaxonUnique
 
@@ -395,44 +225,49 @@ export const usePipelineStore = defineStore('pipeline', () => {
         setStep('filter', { status: 'skipped', detail: 'Both computations disabled' })
       } else {
         setStep('filter', { status: 'running', progress: null, detail: 'Computing…' })
-        const inputSet = new Set(valid)
 
-        const globalTask = doGlobal
-          ? taxonRepo.getUniquePeptides(
-              core, inputSet, signal,
-              (done, total) => {
-                const peptidesDone = Math.min(done * config.taxaBatchSize, core.length)
-                const pct = ((done / total) * 100).toFixed(1)
-                setStep('filter', { progress: done / total, detail: `pept2taxa: ${fmtN(peptidesDone)}/${fmtN(core.length)} peptides (${pct}%)` })
-              },
-            )
-          : Promise.resolve(new Set<string>())
+        const uniquePerSpecies = new Map<number, Set<string>>()
+        let uDone = 0
+        let uNextIdx = 0
 
-        const perTaxonTask = doPerTaxon
-          ? Promise.resolve(Object.fromEntries(
-              [...corePerTaxon.entries()].map(([tId, perCore]) => [
-                tId,
-                filterUnique([...perCore], lineageByPeptide, new Set([tId])),
-              ]),
-            ) as Record<number, string[]>)
-          : Promise.resolve({} as Record<number, string[]>)
+        const uWorker = async (): Promise<void> => {
+          let idx: number
+          while ((idx = uNextIdx++) < descendants.length) {
+            const speciesId = descendants[idx]!
+            const peps = await taxonRepo.getUniquePeptides(speciesId, cleavageRegex, config.minLength, signal)
+            uniquePerSpecies.set(speciesId, new Set(peps))
+            uDone++
+            setStep('filter', {
+              progress: uDone / descendants.length,
+              detail: `${fmtN(uDone)}/${fmtN(descendants.length)} species`,
+            })
+          }
+        }
 
-        const [uniqueSet, perTaxonResult] = await Promise.all([globalTask, perTaxonTask])
+        const uWorkerCount = Math.min(config.parallelRequests, descendants.length)
+        await Promise.all(Array.from({ length: uWorkerCount }, uWorker))
 
         if (doGlobal) {
-          const unique = [...uniqueSet].sort()
+          const uniqueUnion = unionSets(uniquePerSpecies.values())
+          const unique = core.filter((p) => uniqueUnion.has(p)).sort()
           uniquePeptides.value = unique
           uniqueSharedPeptidesComputed.value = true
           addLog('info', `${fmtN(unique.length)} shared unique peptides after filter.`)
         }
 
         if (doPerTaxon) {
-          perTaxonUniqueComputed.value = true
-          for (const [tId, peps] of Object.entries(perTaxonResult)) {
-            addLog('info', `${names[Number(tId)] ?? tId}: ${fmtN(peps.length)} unique peptides.`)
+          const perTaxonResult: Record<number, string[]> = {}
+          for (const taxId of valid) {
+            const taxSpecies = byTaxon[taxId] ?? []
+            const taxSets = taxSpecies.map(sid => uniquePerSpecies.get(sid)).filter((s): s is Set<string> => !!s)
+            const taxUnique = unionSets(taxSets)
+            const taxPeptides = core.filter((p) => taxUnique.has(p)).sort()
+            perTaxonResult[taxId] = taxPeptides
+            addLog('info', `${names[taxId] ?? taxId}: ${fmtN(taxPeptides.length)} unique peptides.`)
           }
+          perTaxonUniquePeptides.value = perTaxonResult
+          perTaxonUniqueComputed.value = true
         }
-        perTaxonUniquePeptides.value = perTaxonResult
 
         const parts: string[] = []
         if (doGlobal) parts.push(`${fmtN(uniquePeptides.value.length)} shared unique`)
@@ -483,11 +318,9 @@ export const usePipelineStore = defineStore('pipeline', () => {
     taxonNames.value = snapshot.taxonNames
     descendantIds.value = snapshot.descendantIds
     descendantsByTaxon.value = snapshot.descendantsByTaxon
-    proteinCounts.value = snapshot.proteinCounts
     intersectionPeptides.value = snapshot.intersectionPeptides
     uniquePeptides.value = snapshot.uniquePeptides
     perTaxonUniquePeptides.value = snapshot.perTaxonUniquePeptides
-    perTaxonCoreCounts.value = snapshot.perTaxonCoreCounts
     lcaByPeptide.value = snapshot.lcaByPeptide
     _allLogs = snapshot.logs.map((l) => ({ ...l, timestamp: new Date(l.timestamp) }))
     allLogsCount.value = _allLogs.length
@@ -516,11 +349,9 @@ export const usePipelineStore = defineStore('pipeline', () => {
     taxonNames: readonly(taxonNames),
     descendantIds: readonly(descendantIds),
     descendantsByTaxon: readonly(descendantsByTaxon),
-    proteinCounts: readonly(proteinCounts),
     intersectionPeptides: readonly(intersectionPeptides),
     uniquePeptides: readonly(uniquePeptides),
     perTaxonUniquePeptides: readonly(perTaxonUniquePeptides),
-    perTaxonCoreCounts: readonly(perTaxonCoreCounts),
     lcaByPeptide: readonly(lcaByPeptide),
     perTaxonUniqueComputed: readonly(perTaxonUniqueComputed),
     uniqueSharedPeptidesComputed: readonly(uniqueSharedPeptidesComputed),

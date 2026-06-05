@@ -5,8 +5,6 @@ import type { TaxonSuggestion } from '@/types'
 import { useConfigStore } from '@/stores/config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
-import { OpensearchService } from '@/services/OpensearchService'
-import { ProteinRepository } from '@/repositories/ProteinRepository'
 import { rankColor } from '@/utils/colors'
 import { isAbortError } from '@/utils/abort'
 import TaxonChip from './TaxonChip.vue'
@@ -20,15 +18,14 @@ const debouncedFilter = ref('')
 const tableLoading = ref(false)
 const rows = ref<TaxonSuggestion[]>([])
 const totalRows = ref(0)
-const proteinCounts = ref<Record<number, number>>({})
 
 
 const headers: DataTableHeader[] = [
-  { title: 'NCBI ID',  align: 'start', value: 'id',       width: '12%', sortable: true  },
-  { title: 'Name',     align: 'start', value: 'name',     width: '38%', sortable: true  },
-  { title: 'Rank',     align: 'start', value: 'rank',     width: '20%', sortable: true  },
-  { title: 'Proteins', align: 'end',   value: 'proteins', width: '15%', sortable: false },
-  { title: '',         align: 'start', value: 'action',   width: '15%', sortable: false },
+  { title: 'NCBI ID',  align: 'start', value: 'id',           width: '12%', sortable: true  },
+  { title: 'Name',     align: 'start', value: 'name',         width: '38%', sortable: true  },
+  { title: 'Rank',     align: 'start', value: 'rank',         width: '20%', sortable: true  },
+  { title: 'Proteins', align: 'end',   value: 'proteinCount', width: '15%', sortable: false },
+  { title: '',         align: 'start', value: 'action',       width: '15%', sortable: false },
 ]
 
 function isSelected(taxon: TaxonSuggestion): boolean {
@@ -56,14 +53,9 @@ function makeRepo(): TaxonRepository {
   return new TaxonRepository(new UnipeptService({
     unipeptUrl: config.unipeptUrl,
     batchSize: config.batchSize,
+    lcaBatchSize: config.lcaBatchSize,
+    parallelRequests: config.parallelRequests,
     equateIL: config.equateIL,
-  }))
-}
-
-function makeProteinRepo(): ProteinRepository {
-  return new ProteinRepository(new OpensearchService({
-    opensearchUrl: config.opensearchUrl,
-    opensearchIndex: config.opensearchIndex,
   }))
 }
 
@@ -75,7 +67,6 @@ type TableOptions = {
 
 type CachedPage = {
   taxa: TaxonSuggestion[]
-  proteinCounts: Record<number, number>
 }
 
 const MAX_CACHE_SIZE = 20
@@ -104,9 +95,7 @@ async function prefetchPage(
   try {
     const start = (page - 1) * itemsPerPage
     const taxa = await makeRepo().search(filter, start, start + itemsPerPage, sortBy, sortDesc, signal)
-    if (signal.aborted) return
-    const counts = await makeProteinRepo().countByTaxon(taxa.map((t) => t.id), signal)
-    if (!signal.aborted) setCachedPage(key, { taxa, proteinCounts: counts })
+    if (!signal.aborted) setCachedPage(key, { taxa })
   } catch (err) {
     if (isAbortError(err)) return
   }
@@ -134,7 +123,6 @@ async function loadTaxa(options: TableOptions) {
   try {
     if (cached) {
       rows.value = cached.taxa
-      proteinCounts.value = cached.proteinCounts
     } else {
       const start = (options.page - 1) * options.itemsPerPage
       const end = start + options.itemsPerPage
@@ -147,15 +135,7 @@ async function loadTaxa(options: TableOptions) {
 
       totalRows.value = count
       rows.value = page
-
-      try {
-        proteinCounts.value = await makeProteinRepo().countByTaxon(page.map((t) => t.id), signal)
-        if (signal.aborted) return
-      } catch (err) {
-        if (isAbortError(err)) return
-        console.error('Failed to load protein counts:', err)
-        proteinCounts.value = {}
-      }
+      setCachedPage(key, { taxa: page })
     }
 
     prefetchController = new AbortController()
@@ -220,10 +200,6 @@ async function loadTaxa(options: TableOptions) {
         />
       </template>
 
-      <template #item.proteins="{ item }">
-        <span class="text-body-2">{{ proteinCounts[item.id]?.toLocaleString() ?? '—' }}</span>
-      </template>
-
       <template #item.rank="{ item }">
         <div class="d-flex align-center">
           <div
@@ -232,6 +208,12 @@ async function loadTaxa(options: TableOptions) {
           />
           {{ item.rank }}
         </div>
+      </template>
+
+      <template #item.proteinCount="{ item }">
+        <span class="text-medium-emphasis">
+          {{ item.proteinCount !== undefined ? item.proteinCount.toLocaleString() : '—' }}
+        </span>
       </template>
 
       <template #item.action="{ item }">

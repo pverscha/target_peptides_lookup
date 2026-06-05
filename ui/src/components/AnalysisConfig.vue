@@ -65,25 +65,6 @@ const cleavageItems = [
         />
       </v-col>
 
-      <v-col cols="12">
-        <v-text-field
-          v-model.number="config.minProteins"
-          label="Min proteins per organism"
-          type="number"
-          :min="0"
-          density="compact"
-          variant="outlined"
-          hide-details
-        >
-          <template #append-inner>
-            <v-tooltip text="Organisms with fewer proteins than this threshold are excluded from results." location="right" max-width="220">
-              <template #activator="{ props: tp }">
-                <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="text-medium-emphasis" style="cursor: default;" />
-              </template>
-            </v-tooltip>
-          </template>
-        </v-text-field>
-      </v-col>
     </v-row>
 
     <div class="d-flex align-center mt-2">
@@ -115,7 +96,7 @@ const cleavageItems = [
         hide-details
         class="flex-shrink-0"
       />
-      <v-tooltip text="For each input taxon, determines which of its core peptides are not found in any organism outside that taxon. Uses LCA data — fast." location="right" max-width="240">
+      <v-tooltip text="For each input taxon, determines which shared peptides are globally unique to at least one species descendant of that taxon." location="right" max-width="240">
         <template #activator="{ props: tp }">
           <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="ml-1 text-medium-emphasis" style="cursor: default;" />
         </template>
@@ -131,7 +112,7 @@ const cleavageItems = [
         hide-details
         class="flex-shrink-0"
       />
-      <v-tooltip text="Determines which shared peptides are exclusive to the selected taxon group by querying pept2taxa. Can be slow for large intersections." location="right" max-width="240">
+      <v-tooltip text="Determines which shared peptides are globally unique to the selected taxon group (not found in any other organism in the Unipept database)." location="right" max-width="240">
         <template #activator="{ props: tp }">
           <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="ml-1 text-medium-emphasis" style="cursor: default;" />
         </template>

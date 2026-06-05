@@ -1,16 +1,12 @@
 export interface Config {
   unipeptUrl: string
-  opensearchUrl: string
-  opensearchIndex: string
   batchSize: number
   lcaBatchSize: number
-  taxaBatchSize: number
   parallelRequests: number
   minLength: number
   equateIL: boolean
   cleavageMethod: 'tryptic' | 'custom'
   cleavageRegex: string
-  minProteins: number
   computePerTaxonUnique: boolean
   computeUniqueSharedPeptides: boolean
 }
@@ -19,14 +15,8 @@ export interface UnipeptConfig {
   unipeptUrl: string
   batchSize: number
   lcaBatchSize: number
-  taxaBatchSize: number
   parallelRequests: number
   equateIL: boolean
-}
-
-export interface OpensearchConfig {
-  opensearchUrl: string
-  opensearchIndex: string
 }
 
 export type StepStatus = 'idle' | 'running' | 'done' | 'error' | 'skipped'
@@ -52,6 +42,7 @@ export interface TaxonSuggestion {
   id: number
   name: string
   rank: string
+  proteinCount?: number
 }
 
 export interface AnalysisParams {
@@ -59,7 +50,6 @@ export interface AnalysisParams {
   equateIL: boolean
   cleavageMethod: 'tryptic' | 'custom'
   cleavageRegex: string
-  minProteins: number
   computePerTaxonUnique: boolean
   computeUniqueSharedPeptides: boolean
 }
@@ -74,11 +64,11 @@ export interface AnalysisSnapshot {
   taxonNames: Record<number, string>
   descendantIds: number[]
   descendantsByTaxon: Record<number, number[]>
-  proteinCounts: Record<number, number>
+  proteinCounts?: Record<number, number>
   intersectionPeptides: string[]
   uniquePeptides: string[]
   perTaxonUniquePeptides: Record<number, string[]>
-  perTaxonCoreCounts: Record<number, number>
+  perTaxonCoreCounts?: Record<number, number>
   lcaByPeptide: Record<string, { id: number; name: string; rank: string }>
   logs: Array<{ level: 'info' | 'warning' | 'error'; message: string; timestamp: string }>
 }

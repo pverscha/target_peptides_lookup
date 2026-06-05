@@ -21,20 +21,7 @@ function downloadPeptides(peptides: string[], filename: string) {
   downloadText(peptides.join('\n'), filename)
 }
 
-const perTaxonData = computed(() => {
-  const m = new Map<number, { peptides: string[]; coreCount: number; pct: string }>()
-  for (const id of pipeline.validTaxaIds) {
-    const peptides = pipeline.perTaxonUniquePeptides[id] ?? []
-    const coreCount = pipeline.perTaxonCoreCounts[id] ?? 0
-    const pct = coreCount === 0 ? '0%' : `${((peptides.length / coreCount) * 100).toFixed(1)}%`
-    m.set(id, { peptides, coreCount, pct })
-  }
-  return m
-})
-
-function perTaxonPeptides(id: number) { return perTaxonData.value.get(id)?.peptides ?? [] }
-function perTaxonCoreCount(id: number) { return perTaxonData.value.get(id)?.coreCount ?? 0 }
-function perTaxonPct(id: number) { return perTaxonData.value.get(id)?.pct ?? '0%' }
+function perTaxonPeptides(id: number) { return pipeline.perTaxonUniquePeptides[id] ?? [] }
 
 function lcaLabel(peptide: string): string {
   const lca = pipeline.lcaByPeptide[peptide]
@@ -156,7 +143,7 @@ function runUniqueSharedAnalysis() {
                   :color="perTaxonPeptides(taxId).length > 0 ? 'success' : 'default'"
                   variant="tonal"
                 >
-                  {{ fmtN(perTaxonPeptides(taxId).length) }} / {{ fmtN(perTaxonCoreCount(taxId)) }} unique ({{ perTaxonPct(taxId) }})
+                  {{ fmtN(perTaxonPeptides(taxId).length) }} unique
                 </v-chip>
               </div>
             </v-expansion-panel-title>

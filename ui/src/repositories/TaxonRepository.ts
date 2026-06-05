@@ -77,19 +77,37 @@ export class TaxonRepository {
   }
 
   /**
-   * Returns the subset of `peptides` that are globally unique for `inputTaxonSet`.
+   * Returns the peptides shared across all taxa in `taxonIds`.
    *
-   * Uses pept2taxa to retrieve all UniProt organisms per peptide, then checks
-   * that every organism is a descendant of at least one input taxon. Peptides
-   * with no organisms in the pept2taxa response are excluded (conservative).
+   * Each taxon must be at species or strain rank. The server digests each
+   * taxon's proteins and returns the set intersection. Batching across
+   * multiple calls (and intersecting the results) is mathematically equivalent
+   * to a single call with all IDs.
+   */
+  getSharedPeptides(
+    taxonIds: number[],
+    cleavageRegex: string,
+    minLength: number,
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    return this.unipept.computeSharedPeptides(taxonIds, cleavageRegex, minLength, signal)
+  }
+
+  /**
+   * Returns the peptides that are globally unique to `taxonId`.
+   *
+   * The taxon must be at species or strain rank. A peptide is considered
+   * unique if every matching protein in the Unipept database belongs to
+   * this taxon — a stricter guarantee than uniqueness relative to the
+   * current input taxon set.
    */
   getUniquePeptides(
-    peptides: string[],
-    inputTaxonSet: Set<number>,
+    taxonId: number,
+    cleavageRegex: string,
+    minLength: number,
     signal: AbortSignal,
-    onProgress?: (done: number, total: number) => void,
-  ): Promise<Set<string>> {
-    return this.unipept.lookupTaxa(peptides, inputTaxonSet, signal, onProgress)
+  ): Promise<string[]> {
+    return this.unipept.computeUniquePeptides(taxonId, cleavageRegex, minLength, signal)
   }
 
   /**
