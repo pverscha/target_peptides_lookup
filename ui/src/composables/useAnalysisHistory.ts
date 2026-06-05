@@ -66,7 +66,7 @@ export function useAnalysisHistory() {
           perTaxonUniquePeptides: pipeline.perTaxonUniquePeptides,
           perTaxonCoreCounts: pipeline.perTaxonCoreCounts,
           lcaByPeptide: pipeline.lcaByPeptide,
-          logs: pipeline.logs.map((l) => ({ ...l, timestamp: l.timestamp.toISOString() })),
+          logs: pipeline.getAllLogs().map((l) => ({ ...l, timestamp: l.timestamp.toISOString() })),
         }))
         await saveAnalysis(snapshot)
         await refresh()

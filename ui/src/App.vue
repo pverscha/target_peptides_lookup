@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { formatLogLines } from '@/utils/format'
-import { downloadText } from '@/utils/download'
 import { usePipelineStatus } from '@/composables/usePipelineStatus'
 import ConfigPanel from './components/ConfigPanel.vue'
 import TaxonInput from './components/TaxonInput.vue'
@@ -37,12 +36,8 @@ const statusLabel = computed(() => ({
   error: 'Pipeline error', cancelled: 'Cancelled',
 }[pipeline.status] ?? ''))
 
-function downloadLog() {
-  downloadText(formatLogLines(pipeline.logs), 'pipeline-log.txt')
-}
-
 async function copyLog() {
-  await navigator.clipboard.writeText(formatLogLines(pipeline.logs))
+  await navigator.clipboard.writeText(formatLogLines(pipeline.getAllLogs()))
 }
 
 const selectedTaxaCount = computed(() => taxonInputRef.value?.selectedTaxa?.value?.length ?? 0)
@@ -188,13 +183,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <div class="right-drawer-header d-flex align-center px-4 py-3">
           <span class="text-subtitle-2 font-weight-bold mr-2">Log</span>
           <v-chip
-            v-if="pipeline.logs.length > 0"
+            v-if="pipeline.allLogsCount > 0"
             size="x-small"
             color="secondary"
             variant="tonal"
             class="mr-auto"
           >
-            {{ pipeline.logs.length }}
+            {{ pipeline.allLogsCount }}
           </v-chip>
           <span v-else class="mr-auto" />
           <div class="d-flex ga-4">
@@ -206,8 +201,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                   variant="text"
                   density="compact"
                   size="small"
-                  :disabled="pipeline.logs.length === 0"
-                  @click="downloadLog"
+                  :disabled="pipeline.allLogsCount === 0"
+                  @click="pipeline.downloadLogs()"
                 />
               </template>
             </v-tooltip>
@@ -219,7 +214,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                   variant="text"
                   density="compact"
                   size="small"
-                  :disabled="pipeline.logs.length === 0"
+                  :disabled="pipeline.allLogsCount === 0"
                   @click="copyLog"
                 />
               </template>

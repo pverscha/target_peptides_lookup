@@ -73,6 +73,16 @@ const entryBg: Record<string, string> = {
     </div>
     <v-divider />
 
+    <!-- Truncation notice -->
+    <div
+      v-if="pipeline.allLogsCount > pipeline.logs.length"
+      class="log-truncation-notice text-caption text-medium-emphasis px-3 py-2 d-flex align-center ga-1"
+    >
+      <v-icon icon="mdi-information-outline" size="12" />
+      Showing last {{ pipeline.logs.length }} of {{ pipeline.allLogsCount }} entries —
+      <a class="log-download-link" @click="pipeline.downloadLogs()">download full log</a>
+    </div>
+
     <!-- Log entries -->
     <div ref="scrollRef" class="log-scroll">
       <div v-if="filteredLogs.length === 0" class="text-caption text-medium-emphasis px-4 py-3">
@@ -131,5 +141,15 @@ const entryBg: Record<string, string> = {
 
 .log-entry-error {
   background: rgba(var(--v-theme-error), 0.08);
+}
+
+.log-truncation-notice {
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.log-download-link {
+  cursor: pointer;
+  text-decoration: underline;
 }
 </style>
