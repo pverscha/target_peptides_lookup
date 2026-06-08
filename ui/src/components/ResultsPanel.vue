@@ -15,8 +15,9 @@ const sharedTab = ref<'all' | 'unique'>('all')
 
 const uniquePeptideSet = computed(() => new Set(pipeline.uniquePeptides))
 const uniqueSharedSkipped = computed(() => pipeline.status === 'done' && !pipeline.uniqueSharedPeptidesComputed && !config.computeUniqueSharedPeptides)
-const perTaxonSkipped = computed(() => pipeline.status === 'done' && !pipeline.perTaxonUniqueComputed && !config.computePerTaxonUnique)
-const perTaxonNoResults = computed(() => pipeline.status === 'done' && !pipeline.perTaxonUniqueComputed && config.computePerTaxonUnique)
+const perTaxonNotComputed = computed(() => pipeline.status === 'done' && !pipeline.perTaxonUniqueComputed)
+const perTaxonSkipped = computed(() => perTaxonNotComputed.value && !config.computePerTaxonUnique)
+const perTaxonNoResults = computed(() => perTaxonNotComputed.value && config.computePerTaxonUnique)
 
 function downloadPeptides(peptides: string[], filename: string) {
   downloadText(peptides.join('\n'), filename)
