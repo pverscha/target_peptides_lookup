@@ -5,7 +5,7 @@ import { useConfigStore } from './config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
 import { chunked, intersectSets, unionSets } from '@/utils/peptides'
-import { fmtN, formatLogLines } from '@/utils/format'
+import { fmtN, fmtPercent, formatLogLines } from '@/utils/format'
 import { downloadText } from '@/utils/download'
 import { isAbortError } from '@/utils/abort'
 
@@ -130,7 +130,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
       setStep('validate', { status: 'running', progress: null, detail: `Checking ${fmtN(inputTaxaIds.length)} IDs…` })
       const { valid, invalid, names } = await taxonRepo.validate(
         inputTaxaIds, signal,
-        (done, total) => setStep('validate', { progress: done / total, detail: `Batch ${fmtN(done)}/${fmtN(total)}` }),
+        (done, total) => setStep('validate', { progress: done / total, detail: fmtPercent(done, total) }),
       )
       for (const id of invalid) addLog('warning', `Unknown taxon ID: ${id}`)
       if (valid.length === 0) throw new Error('None of the provided taxon IDs are known to Unipept.')
@@ -142,7 +142,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
       setStep('descendants', { status: 'running', progress: null, detail: 'Fetching…' })
       const { descendants, byTaxon, warnings: descWarnings } = await taxonRepo.getDescendants(
         valid, signal,
-        (done, total) => setStep('descendants', { progress: done / total, detail: `Batch ${fmtN(done)}/${fmtN(total)}` }),
+        (done, total) => setStep('descendants', { progress: done / total, detail: fmtPercent(done, total) }),
       )
       for (const w of descWarnings) addLog('warning', w)
       if (descendants.length === 0) throw new Error('No species-level descendants found for any input taxon.')
@@ -171,7 +171,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
           batchesDone++
           setStep('intersect', {
             progress: batchesDone / batches.length,
-            detail: `Batch ${fmtN(batchesDone)}/${fmtN(batches.length)}`,
+            detail: fmtPercent(batchesDone, batches.length),
           })
         }
       }
@@ -202,9 +202,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
       const { lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
         core, signal,
         (done, total) => {
-          const peptidesDone = Math.min(done * config.lcaBatchSize, core.length)
-          const pct = ((done / total) * 100).toFixed(1)
-          setStep('lca', { progress: done / total, detail: `${fmtN(peptidesDone)}/${fmtN(core.length)} peptides (${pct}%)` })
+          setStep('lca', { progress: done / total, detail: fmtPercent(done, total) })
         },
       )
       const missing = core.filter((p) => !lcaMap.has(p))
@@ -239,7 +237,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
             uDone++
             setStep('filter', {
               progress: uDone / descendants.length,
-              detail: `${fmtN(uDone)}/${fmtN(descendants.length)} species`,
+              detail: fmtPercent(uDone, descendants.length),
             })
           }
         }

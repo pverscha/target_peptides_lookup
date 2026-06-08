@@ -2,6 +2,10 @@ export function fmtN(n: number): string {
   return n.toLocaleString()
 }
 
+export function fmtPercent(done: number, total: number): string {
+  return `${((done / total) * 100).toFixed(1)}%`
+}
+
 export function formatTime(d: Date): string {
   return d.toTimeString().slice(0, 8)
 }
