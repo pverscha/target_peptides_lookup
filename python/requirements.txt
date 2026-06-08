@@ -1,3 +1,0 @@
-requests>=2.31
-opensearch-py>=2.4
-tqdm>=4.66
