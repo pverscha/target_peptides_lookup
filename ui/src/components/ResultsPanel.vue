@@ -14,8 +14,10 @@ const show = computed(() => pipeline.status === 'done')
 const sharedTab = ref<'all' | 'unique'>('all')
 
 const uniquePeptideSet = computed(() => new Set(pipeline.uniquePeptides))
-const uniqueSharedSkipped = computed(() => pipeline.status === 'done' && !pipeline.uniqueSharedPeptidesComputed)
-const perTaxonSkipped = computed(() => pipeline.status === 'done' && !pipeline.perTaxonUniqueComputed)
+const uniqueSharedSkipped = computed(() => pipeline.status === 'done' && !pipeline.uniqueSharedPeptidesComputed && !config.computeUniqueSharedPeptides)
+const perTaxonNotComputed = computed(() => pipeline.status === 'done' && !pipeline.perTaxonUniqueComputed)
+const perTaxonSkipped = computed(() => perTaxonNotComputed.value && !config.computePerTaxonUnique)
+const perTaxonNoResults = computed(() => perTaxonNotComputed.value && config.computePerTaxonUnique)
 
 function downloadPeptides(peptides: string[], filename: string) {
   downloadText(peptides.join('\n'), filename)
@@ -122,6 +124,21 @@ function runUniqueSharedAnalysis() {
       button-label="Run per-taxon analysis"
       @run="runPerTaxonAnalysis"
     />
+
+    <v-card v-else-if="perTaxonNoResults" class="mb-4">
+      <v-card-title class="text-subtitle-1 font-weight-medium pa-4 pb-2">
+        Per-taxon unique peptides
+      </v-card-title>
+      <v-divider />
+      <v-card-text class="pt-4">
+        <v-alert
+          type="info"
+          variant="tonal"
+          density="compact"
+          text="No valid per-taxon unique peptides could be produced for the selected taxa. This typically occurs when no peptides are shared across all input taxa."
+        />
+      </v-card-text>
+    </v-card>
 
     <v-card v-else class="mb-4">
       <v-card-title class="text-subtitle-1 font-weight-medium pa-4 pb-2">
