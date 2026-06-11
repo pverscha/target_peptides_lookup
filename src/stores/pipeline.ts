@@ -4,7 +4,7 @@ import type { PipelineStep, PipelineStatus, LogEntry, AnalysisSnapshot, TaxonSug
 import { useConfigStore } from './config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
-import { chunked, intersectSets, unionSets } from '@/utils/peptides'
+import { chunked, intersectSets, unionSets, isLeafRank } from '@/utils/peptides'
 import { fmtN, fmtPercent, formatLogLines } from '@/utils/format'
 import { downloadText } from '@/utils/download'
 import { isAbortError } from '@/utils/abort'
@@ -60,8 +60,18 @@ export const usePipelineStore = defineStore('pipeline', () => {
   // taxon set in the entire Unipept database has this peptide).
   const uniquePeptides = ref<string[]>([])
   // Per-taxon unique peptides: for each input taxon, the subset of intersectionPeptides that
-  // are globally unique to at least one species descendant of that taxon.
+  // are globally unique to at least one species descendant of that taxon (leaf taxa), or the
+  // partially-covering peptides sorted by descendant coverage (higher-level taxa).
   const perTaxonUniquePeptides = ref<Record<number, string[]>>({})
+  // Per-taxon coverage data: populated only for higher-level (non-species/strain) input taxa.
+  // Maps each higher-level taxon ID to a peptide → list of descendant species IDs that had
+  // that peptide in their unique_to_parent response. The coverage percentage for a peptide is
+  // coverage[taxId][peptide].length / descendantsByTaxon[taxId].length.
+  const perTaxonCoverage = ref<Record<number, Record<string, number[]>>>({})
+  // Taxonomic rank for each valid input taxon (id → rank string, e.g. "species", "genus").
+  // Populated from inputTaxa and kept as persistent state so downstream steps and the UI
+  // can classify taxa without rebuilding a temporary lookup on every run.
+  const taxonRanks = ref<Record<number, string>>({})
   // LCA metadata for every peptide submitted to pept2lca, keyed by peptide sequence.
   const lcaByPeptide = ref<Record<string, { id: number; name: string; rank: string }>>({})
 
@@ -98,6 +108,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     intersectionPeptides.value = []
     uniquePeptides.value = []
     perTaxonUniquePeptides.value = {}
+    perTaxonCoverage.value = {}
+    taxonRanks.value = {}
     lcaByPeptide.value = {}
     perTaxonUniqueComputed.value = false
     uniqueSharedPeptidesComputed.value = false
@@ -110,6 +122,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
     _restoredFromHistory.value = false
     resetState()
     inputTaxa.value = taxa
+    for (const t of taxa) taxonRanks.value[t.id] = t.rank
     const inputTaxaIds = taxa.map((t) => t.id)
     abortController = new AbortController()
     const signal = abortController.signal
@@ -189,63 +202,139 @@ export const usePipelineStore = defineStore('pipeline', () => {
       addLog('info', `Global core peptidome size: ${fmtN(core.length)}`)
 
       if (core.length === 0) {
-        addLog('info', 'No peptides to look up — nothing to report.')
-        for (const id of ['lca', 'filter'] as StepId[]) {
-          setStep(id, { status: 'skipped', detail: 'Skipped — empty intersection' })
+        addLog('info', 'No shared peptides found.')
+        setStep('lca', { status: 'skipped', detail: 'Skipped — empty intersection' })
+        if (!config.computePerTaxonUnique) {
+          setStep('filter', { status: 'skipped', detail: 'Skipped — empty intersection' })
+          status.value = 'done'
+          return
         }
-        status.value = 'done'
-        return
+        // Per-taxon computation can still find partial coverage or species-unique
+        // peptides even with an empty global core. Fall through to Step 5.
       }
 
       // ── Step 4: LCA lookup ──────────────────────────────────────────────────
-      setStep('lca', { status: 'running', progress: null, detail: 'Querying Unipept pept2lca…' })
-      const { lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
-        core, signal,
-        (done, total) => {
-          setStep('lca', { progress: done / total, detail: fmtPercent(done, total) })
-        },
-      )
-      const missing = core.filter((p) => !lcaMap.has(p))
-      for (const p of missing) addLog('warning', `No LCA returned for peptide: ${p}`)
-      lcaByPeptide.value = Object.fromEntries(lcaMap)
-      setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lcaMap.size)} LCAs retrieved` })
+      if (core.length > 0) {
+        setStep('lca', { status: 'running', progress: null, detail: 'Querying Unipept pept2lca…' })
+        const { lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
+          core, signal,
+          (done, total) => {
+            setStep('lca', { progress: done / total, detail: fmtPercent(done, total) })
+          },
+        )
+        const missing = core.filter((p) => !lcaMap.has(p))
+        for (const p of missing) addLog('warning', `No LCA returned for peptide: ${p}`)
+        lcaByPeptide.value = Object.fromEntries(lcaMap)
+        setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lcaMap.size)} LCAs retrieved` })
+      }
 
       // ── Step 5: Uniqueness filter ───────────────────────────────────────────
       // Uses the unique_peptides endpoint to determine which peptides are globally
-      // unique to at least one species descendant. One request is issued per species,
-      // parallelised via a worker pool. The results are shared between the global
-      // unique computation (union across all species) and the per-taxon computation
-      // (union across each taxon's own descendants), avoiding redundant API calls.
-      const doGlobal = config.computeUniqueSharedPeptides
+      // unique to at least one species descendant. One request is issued per
+      // (species, parent) pair. A single call returns both strict-unique peptides for
+      // the species AND peptides unique to the parent taxon, so per-taxon jobs for
+      // higher-level taxa simultaneously feed both the shared-unique union and the
+      // partial-coverage maps without redundant calls.
+      const doShared = config.computeUniqueSharedPeptides
       const doPerTaxon = config.computePerTaxonUnique
 
-      if (!doGlobal && !doPerTaxon) {
+      if (!doShared && !doPerTaxon) {
         setStep('filter', { status: 'skipped', detail: 'Both computations disabled' })
       } else {
         setStep('filter', { status: 'running', progress: null, detail: 'Computing…' })
 
+        // Leaf classification: species and strain are leaf taxa (strict unique);
+        // anything else is a higher-level taxon (partial coverage via unique_to_parent).
+        // taxonRanks is populated from inputTaxa at the start of run().
+        const isLeaf = (id: number): boolean => isLeafRank(taxonRanks.value[id])
+
+        // uniquePerSpecies: strict-unique peptide set per species, populated at most
+        // once per species regardless of how many parent-taxon jobs reference it.
         const uniquePerSpecies = new Map<number, Set<string>>()
+
+        // coverage[parentTaxId][peptide] = list of species IDs whose unique_to_parent
+        // contained this peptide (only for higher-level per-taxon taxa).
+        const coverage: Record<number, Record<string, number[]>> = {}
+
+        // Build the flat job list. Each job is [speciesId, parentId | undefined].
+        // We deduplicate strictly: a (speciesId, parentId) job is added at most once.
+        type Job = [speciesId: number, parentId: number | undefined]
+        const jobs: Job[] = []
+        const jobKeys = new Set<string>()
+        const addJob = (speciesId: number, parentId?: number): void => {
+          const key = `${speciesId}:${parentId ?? ''}`
+          if (!jobKeys.has(key)) {
+            jobKeys.add(key)
+            jobs.push([speciesId, parentId])
+          }
+        }
+
+        // Species covered by a higher-level parent job (their unique[] comes back in the
+        // same response, so no extra parent-less call is needed for doShared).
+        const coveredByHigherTaxon = new Set<number>()
+
+        if (doPerTaxon) {
+          for (const taxId of valid) {
+            if (isLeaf(taxId)) {
+              // Leaf: call for taxId itself with no parent.
+              addJob(taxId, undefined)
+            } else {
+              // Higher-level: one call per species descendant with this taxon as parent.
+              coverage[taxId] = {}
+              for (const speciesId of byTaxon[taxId] ?? []) {
+                coveredByHigherTaxon.add(speciesId)
+                addJob(speciesId, taxId)
+              }
+            }
+          }
+        }
+
+        if (doShared) {
+          // Ensure every descendant species has its strict-unique peptides retrieved for
+          // the shared-unique union. Parent-taxon jobs already return unique[] for covered
+          // species, so only add parent-less jobs for the remainder.
+          for (const speciesId of descendants) {
+            if (!coveredByHigherTaxon.has(speciesId)) {
+              addJob(speciesId, undefined)
+            }
+          }
+        }
+
+        const total = jobs.length
         let uDone = 0
         let uNextIdx = 0
 
         const uWorker = async (): Promise<void> => {
           let idx: number
-          while ((idx = uNextIdx++) < descendants.length) {
-            const speciesId = descendants[idx]!
-            const peps = await taxonRepo.getUniquePeptides(speciesId, cleavageRegex, config.minLength, signal)
-            uniquePerSpecies.set(speciesId, new Set(peps))
+          while ((idx = uNextIdx++) < total) {
+            const [speciesId, parentId] = jobs[idx]!
+            const { unique, uniqueToParent } = await taxonRepo.getUniquePeptides(
+              speciesId, cleavageRegex, config.minLength, signal, parentId,
+            )
+            // Store strict-unique (parent-independent) at most once per species.
+            if (!uniquePerSpecies.has(speciesId)) {
+              uniquePerSpecies.set(speciesId, new Set(unique))
+            }
+            // Accumulate partial-coverage data when a parent was provided.
+            if (parentId !== undefined && coverage[parentId] !== undefined) {
+              const cov = coverage[parentId]!
+              for (const pep of uniqueToParent) {
+                if (cov[pep] === undefined) cov[pep] = []
+                cov[pep]!.push(speciesId)
+              }
+            }
             uDone++
             setStep('filter', {
-              progress: uDone / descendants.length,
-              detail: fmtPercent(uDone, descendants.length),
+              progress: uDone / total,
+              detail: fmtPercent(uDone, total),
             })
           }
         }
 
-        const uWorkerCount = Math.min(config.parallelRequests, descendants.length)
+        const uWorkerCount = Math.min(config.parallelRequests, Math.max(total, 1))
         await Promise.all(Array.from({ length: uWorkerCount }, uWorker))
 
-        if (doGlobal) {
+        if (doShared) {
           const uniqueUnion = unionSets(uniquePerSpecies.values())
           const unique = core.filter((p) => uniqueUnion.has(p)).sort()
           uniquePeptides.value = unique
@@ -254,21 +343,34 @@ export const usePipelineStore = defineStore('pipeline', () => {
         }
 
         if (doPerTaxon) {
+
           const perTaxonResult: Record<number, string[]> = {}
+          const perTaxonCoverageResult: Record<number, Record<string, number[]>> = {}
           for (const taxId of valid) {
-            const taxSpecies = byTaxon[taxId] ?? []
-            const taxSets = taxSpecies.map(sid => uniquePerSpecies.get(sid)).filter((s): s is Set<string> => !!s)
-            const taxUnique = unionSets(taxSets)
-            const taxPeptides = core.filter((p) => taxUnique.has(p)).sort()
-            perTaxonResult[taxId] = taxPeptides
-            addLog('info', `${names[taxId] ?? taxId}: ${fmtN(taxPeptides.length)} unique peptides.`)
+            if (isLeaf(taxId)) {
+              const peps = [...(uniquePerSpecies.get(taxId) ?? [])].sort()
+              perTaxonResult[taxId] = peps
+              addLog('info', `${names[taxId] ?? taxId}: ${fmtN(peps.length)} unique peptides.`)
+            } else {
+              const cov = coverage[taxId] ?? {}
+              const totalDescendants = (byTaxon[taxId] ?? []).length
+              // Sort by coverage count descending, then alphabetically.
+              const peps = Object.keys(cov).sort((a, b) => {
+                const diff = (cov[b]?.length ?? 0) - (cov[a]?.length ?? 0)
+                return diff !== 0 ? diff : a.localeCompare(b)
+              })
+              perTaxonResult[taxId] = peps
+              perTaxonCoverageResult[taxId] = cov
+              addLog('info', `${names[taxId] ?? taxId}: ${fmtN(peps.length)} partially covering peptides (across ${fmtN(totalDescendants)} descendant species).`)
+            }
           }
           perTaxonUniquePeptides.value = perTaxonResult
+          perTaxonCoverage.value = perTaxonCoverageResult
           perTaxonUniqueComputed.value = true
         }
 
         const parts: string[] = []
-        if (doGlobal) parts.push(`${fmtN(uniquePeptides.value.length)} shared unique`)
+        if (doShared) parts.push(`${fmtN(uniquePeptides.value.length)} shared unique`)
         if (doPerTaxon) parts.push('per-taxon computed')
         setStep('filter', { status: 'done', progress: 1, detail: parts.join('; ') })
       }
@@ -319,6 +421,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     intersectionPeptides.value = snapshot.intersectionPeptides
     uniquePeptides.value = snapshot.uniquePeptides
     perTaxonUniquePeptides.value = snapshot.perTaxonUniquePeptides
+    perTaxonCoverage.value = snapshot.perTaxonCoverage ?? {}
+    taxonRanks.value = Object.fromEntries((snapshot.inputTaxa ?? []).map((t) => [t.id, t.rank]))
     lcaByPeptide.value = snapshot.lcaByPeptide
     _allLogs = snapshot.logs.map((l) => ({ ...l, timestamp: new Date(l.timestamp) }))
     allLogsCount.value = _allLogs.length
@@ -350,6 +454,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     intersectionPeptides: readonly(intersectionPeptides),
     uniquePeptides: readonly(uniquePeptides),
     perTaxonUniquePeptides: readonly(perTaxonUniquePeptides),
+    perTaxonCoverage: readonly(perTaxonCoverage),
+    taxonRanks: readonly(taxonRanks),
     lcaByPeptide: readonly(lcaByPeptide),
     perTaxonUniqueComputed: readonly(perTaxonUniqueComputed),
     uniqueSharedPeptidesComputed: readonly(uniqueSharedPeptidesComputed),

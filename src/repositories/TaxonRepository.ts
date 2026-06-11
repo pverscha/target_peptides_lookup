@@ -83,6 +83,12 @@ export class TaxonRepository {
    * taxon's proteins and returns the set intersection. Batching across
    * multiple calls (and intersecting the results) is mathematically equivalent
    * to a single call with all IDs.
+   *
+   * @param taxonIds - NCBI taxon IDs at species or strain rank.
+   * @param cleavageRegex - Regular expression used to cleave protein sequences
+   *   into peptides (e.g. `[KR](?!P)` for trypsin).
+   * @param minLength - Minimum peptide length; shorter fragments are discarded.
+   * @param signal - Abort signal; rejects the returned promise on abort.
    */
   getSharedPeptides(
     taxonIds: number[],
@@ -94,20 +100,36 @@ export class TaxonRepository {
   }
 
   /**
-   * Returns the peptides that are globally unique to `taxonId`.
+   * Returns the peptides that are globally unique to `taxonId`, and optionally
+   * the peptides unique to a parent taxon that contains `taxonId`.
    *
-   * The taxon must be at species or strain rank. A peptide is considered
-   * unique if every matching protein in the Unipept database belongs to
-   * this taxon — a stricter guarantee than uniqueness relative to the
-   * current input taxon set.
+   * The taxon must be at species or strain rank. The implementation calls the
+   * count endpoint first, then fans out sequential GET requests over disjoint
+   * protein ranges of size UNIQUE_PEPTIDES_BATCH_SIZE. Results are merged by
+   * set union (classification is deterministic per peptide across batches).
+   *
+   * When `parentId` is provided, the response additionally contains
+   * `uniqueToParent`: peptides that are not strictly unique to `taxonId` but
+   * are unique to the parent taxon `parentId`. This allows computing partial
+   * coverage for higher-level taxa: call once per species descendant with the
+   * parent taxon ID, then aggregate `uniqueToParent` across all descendants.
+   *
+   * @param taxonId - NCBI taxon ID at species or strain rank.
+   * @param cleavageRegex - Regular expression used to cleave protein sequences
+   *   into peptides (e.g. `[KR](?!P)` for trypsin).
+   * @param minLength - Minimum peptide length; shorter fragments are discarded.
+   * @param signal - Abort signal; rejects the returned promise on abort.
+   * @param parentId - Optional NCBI taxon ID of the parent (higher-level) taxon.
+   *   When provided, the response also includes `uniqueToParent`.
    */
   getUniquePeptides(
     taxonId: number,
     cleavageRegex: string,
     minLength: number,
     signal: AbortSignal,
-  ): Promise<string[]> {
-    return this.unipept.computeUniquePeptides(taxonId, cleavageRegex, minLength, signal)
+    parentId?: number,
+  ): Promise<{ unique: string[]; uniqueToParent: string[] }> {
+    return this.unipept.computeUniquePeptides(taxonId, cleavageRegex, minLength, signal, parentId)
   }
 
   /**

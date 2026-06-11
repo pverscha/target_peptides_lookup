@@ -96,7 +96,7 @@ const cleavageItems = [
         hide-details
         class="flex-shrink-0"
       />
-      <v-tooltip text="For each input taxon, determines which shared peptides are globally unique to at least one species descendant of that taxon." location="right" max-width="240">
+      <v-tooltip text="For species/strain taxa, shows strict unique peptides. For higher-level taxa (genus, family, …), shows partially covering peptides with a coverage percentage: how many descendant species carry each peptide." location="right" max-width="280">
         <template #activator="{ props: tp }">
           <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="ml-1 text-medium-emphasis" style="cursor: default;" />
         </template>

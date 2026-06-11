@@ -69,6 +69,10 @@ export interface AnalysisSnapshot {
   uniquePeptides: string[]
   perTaxonUniquePeptides: Record<number, string[]>
   perTaxonCoreCounts?: Record<number, number>
+  /** Coverage data for higher-level (non-species/strain) taxa. Maps taxon ID →
+   *  peptide → list of descendant species IDs that contained this peptide in their
+   *  unique_to_parent response. Absent for taxa shown as strict-unique (leaves). */
+  perTaxonCoverage?: Record<number, Record<string, number[]>>
   lcaByPeptide: Record<string, { id: number; name: string; rank: string }>
   logs: Array<{ level: 'info' | 'warning' | 'error'; message: string; timestamp: string }>
 }

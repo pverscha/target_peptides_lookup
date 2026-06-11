@@ -2,8 +2,9 @@
 import { computed, ref } from 'vue'
 import { usePipelineStore } from '@/stores/pipeline'
 import { useConfigStore } from '@/stores/config'
-import { fmtN } from '@/utils/format'
+import { fmtN, fmtPercent } from '@/utils/format'
 import { downloadText } from '@/utils/download'
+import { isLeafRank } from '@/utils/peptides'
 import NotComputedCard from './NotComputedCard.vue'
 
 const pipeline = usePipelineStore()
@@ -25,6 +26,35 @@ function downloadPeptides(peptides: string[], filename: string) {
 
 function perTaxonPeptides(id: number) { return pipeline.perTaxonUniquePeptides[id] ?? [] }
 
+function isPartial(id: number): boolean {
+  return !isLeafRank(pipeline.taxonRanks[id])
+}
+
+interface CoverageItem {
+  peptide: string
+  count: number
+  total: number
+  pct: string
+}
+
+/** Coverage rows for a higher-level taxon, already in display order (stored sort). */
+function perTaxonCoverageItems(id: number): CoverageItem[] {
+  const cov = pipeline.perTaxonCoverage[id]
+  const total = (pipeline.descendantsByTaxon[id] ?? []).length
+  if (!cov || total === 0) return []
+  return perTaxonPeptides(id).map((peptide) => {
+    const count = cov[peptide]?.length ?? 0
+    return { peptide, count, total, pct: fmtPercent(count, total) }
+  })
+}
+
+function downloadPartialPeptides(id: number): void {
+  const items = perTaxonCoverageItems(id)
+  const header = 'peptide\tspecies_with_peptide\ttotal_species\tcoverage_percent'
+  const rows = items.map((r) => `${r.peptide}\t${r.count}\t${r.total}\t${r.pct}`)
+  downloadText([header, ...rows].join('\n'), `partial_peptides_${id}.tsv`)
+}
+
 function lcaLabel(peptide: string): string {
   const lca = pipeline.lcaByPeptide[peptide]
   if (!lca) return ''
@@ -39,12 +69,14 @@ function unipeptPeptideUrl(peptide: string): string {
 
 function runPerTaxonAnalysis() {
   config.computePerTaxonUnique = true
-  pipeline.run([...pipeline.validTaxaIds])
+  // Pass the full TaxonSuggestion objects (not just IDs) so rank survives the re-run.
+  pipeline.run([...pipeline.inputTaxa])
 }
 
 function runUniqueSharedAnalysis() {
   config.computeUniqueSharedPeptides = true
-  pipeline.run([...pipeline.validTaxaIds])
+  // Pass the full TaxonSuggestion objects (not just IDs) so rank survives the re-run.
+  pipeline.run([...pipeline.inputTaxa])
 }
 </script>
 
@@ -155,7 +187,18 @@ function runUniqueSharedAnalysis() {
               <div class="d-flex align-center flex-wrap ga-2">
                 <span class="font-weight-medium">{{ pipeline.taxonNames[taxId] ?? taxId }}</span>
                 <v-chip size="x-small" color="secondary" variant="tonal">NCBI {{ taxId }}</v-chip>
+                <!-- Partially-covering peptides chip (higher-level taxa) -->
                 <v-chip
+                  v-if="isPartial(taxId)"
+                  size="x-small"
+                  :color="perTaxonPeptides(taxId).length > 0 ? 'warning' : 'default'"
+                  variant="tonal"
+                >
+                  {{ fmtN(perTaxonPeptides(taxId).length) }} partially covering
+                </v-chip>
+                <!-- Strict-unique peptides chip (species / strain taxa) -->
+                <v-chip
+                  v-else
                   size="x-small"
                   :color="perTaxonPeptides(taxId).length > 0 ? 'success' : 'default'"
                   variant="tonal"
@@ -165,35 +208,84 @@ function runUniqueSharedAnalysis() {
               </div>
             </v-expansion-panel-title>
             <v-expansion-panel-text>
-              <template v-if="perTaxonPeptides(taxId).length > 0">
-                <v-sheet rounded border style="max-height: 280px; overflow-y: auto;" class="mb-3">
-                  <v-virtual-scroll
-                    :items="perTaxonPeptides(taxId)"
-                    item-height="28"
-                    style="max-height: 280px;"
+
+              <!-- ── Higher-level taxon: partially-covering peptides with coverage ── -->
+              <template v-if="isPartial(taxId)">
+                <template v-if="perTaxonPeptides(taxId).length > 0">
+                  <v-sheet rounded border style="max-height: 320px; overflow-y: auto;" class="mb-3">
+                    <v-virtual-scroll
+                      :items="perTaxonCoverageItems(taxId)"
+                      item-height="32"
+                      style="max-height: 320px;"
+                    >
+                      <template #default="{ item }">
+                        <div class="d-flex align-center px-3 py-1 ga-3" style="min-height: 32px;">
+                          <span class="text-body-2 font-mono text-mono flex-shrink-0">{{ item.peptide }}</span>
+                          <v-spacer />
+                          <v-chip
+                            size="x-small"
+                            color="warning"
+                            variant="tonal"
+                            :title="`Present in ${item.count} of ${item.total} descendant species`"
+                          >
+                            {{ item.count }}/{{ item.total }} ({{ item.pct }})
+                          </v-chip>
+                        </div>
+                      </template>
+                    </v-virtual-scroll>
+                  </v-sheet>
+                  <v-btn
+                    size="small"
+                    color="primary"
+                    variant="tonal"
+                    prepend-icon="mdi-download"
+                    @click="downloadPartialPeptides(taxId)"
                   >
-                    <template #default="{ item }">
-                      <div class="px-3 py-1 text-body-2 font-mono text-mono">{{ item }}</div>
-                    </template>
-                  </v-virtual-scroll>
-                </v-sheet>
-                <v-btn
-                  size="small"
-                  color="primary"
+                    Download ({{ fmtN(perTaxonPeptides(taxId).length) }} partially covering peptides)
+                  </v-btn>
+                </template>
+                <v-alert
+                  v-else
+                  type="info"
                   variant="tonal"
-                  prepend-icon="mdi-download"
-                  @click="downloadPeptides(perTaxonPeptides(taxId), `unique_peptides_${taxId}.txt`)"
-                >
-                  Download ({{ fmtN(perTaxonPeptides(taxId).length) }} unique peptides)
-                </v-btn>
+                  density="compact"
+                  text="No partially covering peptides identified for this taxon."
+                />
               </template>
-              <v-alert
-                v-else
-                type="info"
-                variant="tonal"
-                density="compact"
-                text="No unique peptides identified for this taxon."
-              />
+
+              <!-- ── Leaf taxon (species / strain): strict unique peptides ── -->
+              <template v-else>
+                <template v-if="perTaxonPeptides(taxId).length > 0">
+                  <v-sheet rounded border style="max-height: 280px; overflow-y: auto;" class="mb-3">
+                    <v-virtual-scroll
+                      :items="perTaxonPeptides(taxId)"
+                      item-height="28"
+                      style="max-height: 280px;"
+                    >
+                      <template #default="{ item }">
+                        <div class="px-3 py-1 text-body-2 font-mono text-mono">{{ item }}</div>
+                      </template>
+                    </v-virtual-scroll>
+                  </v-sheet>
+                  <v-btn
+                    size="small"
+                    color="primary"
+                    variant="tonal"
+                    prepend-icon="mdi-download"
+                    @click="downloadPeptides(perTaxonPeptides(taxId), `unique_peptides_${taxId}.txt`)"
+                  >
+                    Download ({{ fmtN(perTaxonPeptides(taxId).length) }} unique peptides)
+                  </v-btn>
+                </template>
+                <v-alert
+                  v-else
+                  type="info"
+                  variant="tonal"
+                  density="compact"
+                  text="No unique peptides identified for this taxon."
+                />
+              </template>
+
             </v-expansion-panel-text>
           </v-expansion-panel>
         </v-expansion-panels>

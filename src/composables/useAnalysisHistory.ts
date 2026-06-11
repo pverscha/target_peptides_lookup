@@ -62,6 +62,7 @@ export function useAnalysisHistory() {
           intersectionPeptides: pipeline.intersectionPeptides,
           uniquePeptides: pipeline.uniquePeptides,
           perTaxonUniquePeptides: pipeline.perTaxonUniquePeptides,
+          perTaxonCoverage: pipeline.perTaxonCoverage,
           lcaByPeptide: pipeline.lcaByPeptide,
           logs: pipeline.getAllLogs().map((l) => ({ ...l, timestamp: l.timestamp.toISOString() })),
         }))

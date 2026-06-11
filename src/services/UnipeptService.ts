@@ -44,6 +44,8 @@ interface LcaEntry {
   forma_id: number | null
 }
 
+const UNIQUE_PEPTIDES_BATCH_SIZE = 500
+
 export class UnipeptService {
   constructor(private readonly config: UnipeptConfig) {}
 
@@ -191,23 +193,59 @@ export class UnipeptService {
     return data.shared_peptides
   }
 
+  private async fetchUniquePeptidesCount(taxonId: number, signal: AbortSignal): Promise<number> {
+    const res = await this.fetchWithRetry(
+      `${this.config.unipeptUrl}/private_api/taxa/unique_peptides/count`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taxon_id: taxonId }),
+      },
+      signal,
+    )
+    const data: { protein_count: number } = await res.json()
+    return data.protein_count
+  }
+
   async computeUniquePeptides(
     taxonId: number,
     cleavageRegex: string,
     minLength: number,
     signal: AbortSignal,
-  ): Promise<string[]> {
-    const res = await this.fetchWithRetry(
-      `${this.config.unipeptUrl}/private_api/taxa/unique_peptides`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taxon_id: taxonId, cleavage_regex: cleavageRegex, min_length: minLength }),
-      },
-      signal,
-    )
-    const data: { unique_peptides: string[]; total_peptides: number; total_unique_peptides: number } = await res.json()
-    return data.unique_peptides
+    parentId?: number,
+  ): Promise<{ unique: string[]; uniqueToParent: string[] }> {
+    const proteinCount = await this.fetchUniquePeptidesCount(taxonId, signal)
+    if (proteinCount === 0) return { unique: [], uniqueToParent: [] }
+
+    const allUnique = new Set<string>()
+    const allUniqueToParent = new Set<string>()
+
+    for (let start = 0; start < proteinCount; start += UNIQUE_PEPTIDES_BATCH_SIZE) {
+      const end = start + UNIQUE_PEPTIDES_BATCH_SIZE
+      const body: Record<string, unknown> = {
+        taxon_id: taxonId,
+        start,
+        end,
+        cleavage_regex: cleavageRegex,
+        min_length: minLength,
+      }
+      if (parentId !== undefined) body.parent_id = parentId
+
+      const res = await this.fetchWithRetry(
+        `${this.config.unipeptUrl}/private_api/taxa/unique_peptides`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+        signal,
+      )
+      const data: { unique_peptides: string[]; unique_to_parent?: string[] } = await res.json()
+      for (const p of data.unique_peptides) allUnique.add(p)
+      for (const p of data.unique_to_parent ?? []) allUniqueToParent.add(p)
+    }
+
+    return { unique: [...allUnique], uniqueToParent: [...allUniqueToParent] }
   }
 
   async searchTaxa(

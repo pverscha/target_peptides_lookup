@@ -104,3 +104,7 @@ export function unionSets<T>(sets: Iterable<Set<T>>): Set<T> {
   for (const s of sets) for (const v of s) result.add(v)
   return result
 }
+
+export function isLeafRank(rank: string | undefined): boolean {
+  return rank === 'species' || rank === 'strain'
+}
