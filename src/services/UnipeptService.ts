@@ -78,14 +78,30 @@ export class UnipeptService {
     return { valid, invalid, names }
   }
 
+  /**
+   * Fetches all species-level descendants for the given NCBI taxon IDs.
+   *
+   * IDs are queried in batches. For each batch the API returns only the taxa
+   * that have at least one species-level descendant; any ID absent from the
+   * response is collected in `taxaWithoutDescendants` so the caller can decide
+   * how to handle them (e.g. log a warning).
+   *
+   * @param taxaIds - NCBI taxon IDs whose descendants should be fetched.
+   * @param signal - Abort signal; rejects the returned promise on abort.
+   * @param onProgress - Optional callback invoked after each batch with
+   *   the number of batches completed and the total batch count.
+   * @returns Object with `descendants` (deduplicated union of all species-level
+   *   descendant IDs), `descendantsPerTaxon` (per-input-taxon descendant lists),
+   *   and `taxaWithoutDescendants` (input IDs that had no species-level descendants).
+   */
   async collectDescendants(
     taxaIds: number[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<{ descendants: number[]; byTaxon: Record<number, number[]>; warnings: string[] }> {
+  ): Promise<{ descendants: number[]; descendantsPerTaxon: Record<number, number[]>; taxaWithoutDescendants: number[] }> {
     const allDescendants = new Set<number>()
-    const byTaxon: Record<number, number[]> = {}
-    const warnings: string[] = []
+    const descendantsPerTaxon: Record<number, number[]> = {}
+    const taxaWithoutDescendants: number[] = []
     const chunks = chunked(taxaIds, this.config.batchSize)
 
     for (const [i, chunk] of chunks.entries()) {
@@ -100,20 +116,20 @@ export class UnipeptService {
       const withDescendants = new Set(data.map((e) => e.taxon_id))
       for (const id of chunk) {
         if (!withDescendants.has(id)) {
-          warnings.push(`Taxon ${id} has no species-level descendants`)
+          taxaWithoutDescendants.push(id)
         }
       }
 
       for (const entry of data) {
         if (entry.descendants && entry.descendants.length > 0) {
-          byTaxon[entry.taxon_id] = entry.descendants
+          descendantsPerTaxon[entry.taxon_id] = entry.descendants
           for (const d of entry.descendants) allDescendants.add(d)
         }
       }
       onProgress?.(i + 1, chunks.length)
     }
 
-    return { descendants: [...allDescendants], byTaxon, warnings }
+    return { descendants: [...allDescendants], descendantsPerTaxon, taxaWithoutDescendants }
   }
 
   async lookupLcas(

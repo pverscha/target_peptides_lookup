@@ -24,6 +24,8 @@ export class TaxonRepository {
    * @param signal - Abort signal; rejects the returned promise on abort.
    * @param onProgress - Optional callback invoked after each batch with
    *   the number of batches completed and the total batch count.
+   * @returns Object with `valid` (recognised IDs), `invalid` (unrecognised IDs),
+   *   and `names` (display name keyed by taxon ID) for each valid taxon.
    */
   validate(
     taxaIds: number[],
@@ -45,12 +47,15 @@ export class TaxonRepository {
    * @param signal - Abort signal; rejects the returned promise on abort.
    * @param onProgress - Optional callback invoked after each batch with
    *   the number of batches completed and the total batch count.
+   * @returns Object with `descendants` (deduplicated union of all species-level
+   *   descendant IDs), `descendantsPerTaxon` (per-input-taxon descendant lists), and
+   *   `taxaWithoutDescendants` (input IDs that had no species-level descendants).
    */
   getDescendants(
     taxaIds: number[],
     signal: AbortSignal,
     onProgress?: (done: number, total: number) => void,
-  ): Promise<{ descendants: number[]; byTaxon: Record<number, number[]>; warnings: string[] }> {
+  ): Promise<{ descendants: number[]; descendantsPerTaxon: Record<number, number[]>; taxaWithoutDescendants: number[] }> {
     return this.unipept.collectDescendants(taxaIds, signal, onProgress)
   }
 
@@ -67,6 +72,10 @@ export class TaxonRepository {
    * @param signal - Abort signal; rejects the returned promise on abort.
    * @param onProgress - Optional callback invoked after each batch with
    *   the number of batches completed and the total batch count.
+   * @returns Object with `lineageByPeptide` (maps each peptide to the set of all
+   *   taxon IDs in its LCA lineage) and `lcaByPeptide` (maps each peptide to its
+   *   LCA taxon with `id`, `name`, and `rank`). Peptides absent from Unipept are
+   *   omitted from both maps.
    */
   getLcas(
     peptides: string[],
@@ -89,6 +98,7 @@ export class TaxonRepository {
    *   into peptides (e.g. `[KR](?!P)` for trypsin).
    * @param minLength - Minimum peptide length; shorter fragments are discarded.
    * @param signal - Abort signal; rejects the returned promise on abort.
+   * @returns Array of tryptic peptide sequences present in every taxon's proteome.
    */
   getSharedPeptides(
     taxonIds: number[],
@@ -121,6 +131,9 @@ export class TaxonRepository {
    * @param signal - Abort signal; rejects the returned promise on abort.
    * @param parentId - Optional NCBI taxon ID of the parent (higher-level) taxon.
    *   When provided, the response also includes `uniqueToParent`.
+   * @returns Object with `unique` (peptides globally unique to `taxonId`) and
+   *   `uniqueToParent` (peptides unique to `parentId` but not strictly to `taxonId`;
+   *   empty array when `parentId` is omitted).
    */
   getUniquePeptides(
     taxonId: number,
@@ -145,6 +158,8 @@ export class TaxonRepository {
    * @param sortBy - Column to sort by.
    * @param sortDesc - Sort in descending order when true.
    * @param signal - Abort signal; rejects the returned promise on abort.
+   * @returns Array of `TaxonSuggestion` objects for the requested page, ordered
+   *   by the specified column.
    */
   search(
     query: string,
@@ -166,6 +181,7 @@ export class TaxonRepository {
    *
    * @param query - Text to filter by.
    * @param signal - Abort signal; rejects the returned promise on abort.
+   * @returns Total number of taxa matching `query`.
    */
   count(query: string, signal: AbortSignal): Promise<number> {
     return this.unipept.countTaxa(query, signal)
@@ -179,6 +195,8 @@ export class TaxonRepository {
    *
    * @param ids - NCBI taxon IDs to resolve.
    * @param signal - Abort signal; rejects the returned promise on abort.
+   * @returns Array of `TaxonSuggestion` objects for each recognised ID.
+   *   IDs not found in Unipept are omitted.
    */
   fetchById(ids: number[], signal: AbortSignal): Promise<TaxonSuggestion[]> {
     return this.unipept.fetchTaxaById(ids, signal)

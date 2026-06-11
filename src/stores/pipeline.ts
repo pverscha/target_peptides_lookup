@@ -116,6 +116,181 @@ export const usePipelineStore = defineStore('pipeline', () => {
     steps.value = makeSteps()
   }
 
+  /**
+   * Validates a list of NCBI taxon IDs against the Unipept database.
+   * Logs a warning for each unknown ID and throws if none are valid.
+   * Updates `validTaxaIds` and `taxonNames` with the accepted results.
+   *
+   * @param inputTaxaIds - NCBI taxon IDs to validate.
+   * @param taxonRepo - Repository used to query taxon validity.
+   * @param signal - AbortSignal to cancel the request.
+   * @returns The subset of `inputTaxaIds` that are known to Unipept.
+   * @throws If none of the provided IDs are valid.
+   */
+  async function validateInputTaxa(
+      inputTaxaIds: number[],
+      taxonRepo: TaxonRepository,
+      signal: AbortSignal,
+  ) {
+    setStep('validate', { status: 'running', progress: null, detail: `Checking ${fmtN(inputTaxaIds.length)} IDs…` });
+
+    const { valid, invalid, names } = await taxonRepo.validate(
+        inputTaxaIds, signal,
+        (done, total) => setStep('validate', { progress: done / total, detail: fmtPercent(done, total) }),
+    )
+
+    for (const id of invalid) {
+      addLog('warning', `Unknown taxon ID: ${id}`);
+    }
+
+    if (valid.length === 0) {
+      throw new Error('None of the provided taxon IDs are known to Unipept.')
+    }
+
+    validTaxaIds.value = valid;
+    taxonNames.value = names;
+
+    setStep('validate', { status: 'done', progress: 1, detail: `${fmtN(valid.length)}/${fmtN(inputTaxaIds.length)} valid` });
+
+    return valid;
+  }
+
+  /**
+   * Fetches all species-level descendants for the validated input taxa.
+   * Converts each taxon ID with no species-level descendants into a warning
+   * log entry, and throws if none are found across all input taxa.
+   * Updates `descendantIds` and `descendantsByTaxon` with the results.
+   *
+   * @param validTaxa - NCBI taxon IDs confirmed to exist in Unipept.
+   * @param taxonRepo - Repository used to fetch descendant data.
+   * @param signal - AbortSignal to cancel the request.
+   * @returns Object with `descendants` (deduplicated union of all species-level
+   *   descendant IDs) and `descendantsPerTaxon` (per-input-taxon descendant lists).
+   * @throws If no species-level descendants are found for any input taxon.
+   */
+  async function computeDescendants(
+    validTaxa: number[],
+    taxonRepo: TaxonRepository,
+    signal: AbortSignal,
+  ) {
+    setStep('descendants', { status: 'running', progress: null, detail: 'Fetching…' });
+
+    const { descendants, descendantsPerTaxon, taxaWithoutDescendants } = await taxonRepo.getDescendants(
+        validTaxa, signal,
+        (done, total) => setStep('descendants', { progress: done / total, detail: fmtPercent(done, total) }),
+    )
+
+    for (const id of taxaWithoutDescendants) {
+      addLog('warning', `Taxon ${id} has no species-level descendants`);
+    }
+
+    if (descendants.length === 0) {
+      throw new Error('No species-level descendants found for any input taxon.');
+    }
+
+    descendantIds.value = descendants;
+    descendantsByTaxon.value = descendantsPerTaxon;
+
+    setStep('descendants', { status: 'done', progress: 1, detail: `${fmtN(descendants.length)} species` });
+    addLog('info', `Collected ${fmtN(descendants.length)} unique species-level descendants.`);
+
+    return { descendants, descendantsPerTaxon };
+  }
+
+  /**
+   * Computes the global core peptidome: the set of tryptic peptides shared
+   * across ALL species-level descendants of the input taxa.
+   *
+   * Descendants are split into batches of `SHARED_PEPTIDES_BATCH_SIZE` and
+   * queried in parallel (up to `config.parallelRequests` concurrent requests).
+   * The per-batch peptide sets are intersected to produce the global core.
+   * Updates `intersectionPeptides` with the sorted result.
+   *
+   * @param descendants - Deduplicated species-level descendant taxon IDs.
+   * @param taxonRepo - Repository used to fetch shared peptides per batch.
+   * @param cleavageRegex - Regular expression used to cleave protein sequences
+   *   into peptides (e.g. `[KR](?!P)` for trypsin).
+   * @param signal - AbortSignal to cancel the request.
+   * @returns Sorted array of peptide sequences present in every descendant's proteome.
+   */
+  async function computeSharedPeptides(
+    descendants: number[],
+    taxonRepo: TaxonRepository,
+    cleavageRegex: string,
+    signal: AbortSignal
+  ) {
+    setStep('intersect', { status: 'running', progress: null, detail: 'Requesting shared peptides…' })
+    const batches = chunked(descendants, SHARED_PEPTIDES_BATCH_SIZE)
+    let batchesDone = 0
+    let nextBatchIdx = 0
+    const batchSets: Set<string>[] = new Array(batches.length)
+
+    const sharedWorker = async (): Promise<void> => {
+      let idx: number
+      while ((idx = nextBatchIdx++) < batches.length) {
+        const peps = await taxonRepo.getSharedPeptides(batches[idx]!, cleavageRegex, config.minLength, signal)
+        batchSets[idx] = new Set<string>(peps)
+        batchesDone++
+        setStep('intersect', {
+          progress: batchesDone / batches.length,
+          detail: fmtPercent(batchesDone, batches.length),
+        })
+      }
+    }
+
+    const sharedWorkerCount = Math.min(config.parallelRequests, batches.length)
+    await Promise.all(Array.from({ length: sharedWorkerCount }, sharedWorker))
+    const globalCore: Set<string> = batchSets.reduce((a, b) => intersectSets(a, b))
+    const core: string[] = [...globalCore].sort()
+    intersectionPeptides.value = core
+
+    setStep('intersect', {
+      status: 'done',
+      progress: 1,
+      detail: core.length === 0 ? 'No shared peptides' : `${fmtN(core.length)} shared peptides`,
+    })
+
+    addLog('info', `Global core peptidome size: ${fmtN(core.length)}`);
+
+    if (core.length === 0) {
+      addLog('info', 'No shared peptides found.');
+    }
+
+    return core;
+  }
+
+  /**
+   * Looks up the LCA taxon for each peptide in the global core peptidome.
+   * Skips the step entirely when `core` is empty.
+   * Logs a warning for any peptide not found in Unipept.
+   * Updates `lcaByPeptide` with the results.
+   *
+   * @param core - Tryptic peptide sequences from the global core peptidome.
+   * @param taxonRepo - Repository used to query LCA data.
+   * @param signal - AbortSignal to cancel the request.
+   */
+  async function lookupLcas(
+      core: string[],
+      taxonRepo: TaxonRepository,
+      signal: AbortSignal
+  ) {
+    if (core.length > 0) {
+      setStep('lca', { status: 'running', progress: null, detail: 'Querying Unipept pept2lca…' })
+      const { lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
+          core, signal,
+          (done, total) => {
+            setStep('lca', { progress: done / total, detail: fmtPercent(done, total) })
+          },
+      )
+      const missing = core.filter((p) => !lcaMap.has(p))
+      for (const p of missing) addLog('warning', `No LCA returned for peptide: ${p}`)
+      lcaByPeptide.value = Object.fromEntries(lcaMap)
+      setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lcaMap.size)} LCAs retrieved` })
+    } else {
+      setStep('lca', { status: 'skipped', detail: 'Skipped — empty intersection' })
+    }
+  }
+
   async function run(taxa: TaxonSuggestion[]) {
     if (status.value === 'running') return
 
@@ -140,93 +315,16 @@ export const usePipelineStore = defineStore('pipeline', () => {
 
     try {
       // ── Step 1: Validate ────────────────────────────────────────────────────
-      setStep('validate', { status: 'running', progress: null, detail: `Checking ${fmtN(inputTaxaIds.length)} IDs…` })
-      const { valid, invalid, names } = await taxonRepo.validate(
-        inputTaxaIds, signal,
-        (done, total) => setStep('validate', { progress: done / total, detail: fmtPercent(done, total) }),
-      )
-      for (const id of invalid) addLog('warning', `Unknown taxon ID: ${id}`)
-      if (valid.length === 0) throw new Error('None of the provided taxon IDs are known to Unipept.')
-      validTaxaIds.value = valid
-      taxonNames.value = names
-      setStep('validate', { status: 'done', progress: 1, detail: `${fmtN(valid.length)}/${fmtN(inputTaxaIds.length)} valid` })
+      const validTaxa = await validateInputTaxa(inputTaxaIds, taxonRepo, signal);
 
       // ── Step 2: Descendants ─────────────────────────────────────────────────
-      setStep('descendants', { status: 'running', progress: null, detail: 'Fetching…' })
-      const { descendants, byTaxon, warnings: descWarnings } = await taxonRepo.getDescendants(
-        valid, signal,
-        (done, total) => setStep('descendants', { progress: done / total, detail: fmtPercent(done, total) }),
-      )
-      for (const w of descWarnings) addLog('warning', w)
-      if (descendants.length === 0) throw new Error('No species-level descendants found for any input taxon.')
-      descendantIds.value = descendants
-      descendantsByTaxon.value = byTaxon
-      setStep('descendants', { status: 'done', progress: 1, detail: `${fmtN(descendants.length)} species` })
-      addLog('info', `Collected ${fmtN(descendants.length)} unique species-level descendants.`)
+      const { descendants, descendantsPerTaxon } = await computeDescendants(validTaxa, taxonRepo, signal);
 
       // ── Step 3: Compute shared peptides ─────────────────────────────────────
-      // Sends species-level descendant IDs in batches of SHARED_PEPTIDES_BATCH_SIZE
-      // to the shared_peptides endpoint. The server digests proteins and computes the
-      // peptide intersection. The batch results are intersected client-side to obtain
-      // the global core peptidome. This is mathematically equivalent to a single call
-      // with all IDs because shared(A ∪ B) = shared(A) ∩ shared(B).
-      setStep('intersect', { status: 'running', progress: null, detail: 'Requesting shared peptides…' })
-      const batches = chunked(descendants, SHARED_PEPTIDES_BATCH_SIZE)
-      let batchesDone = 0
-      let nextBatchIdx = 0
-      const batchSets: Set<string>[] = new Array(batches.length)
-
-      const sharedWorker = async (): Promise<void> => {
-        let idx: number
-        while ((idx = nextBatchIdx++) < batches.length) {
-          const peps = await taxonRepo.getSharedPeptides(batches[idx]!, cleavageRegex, config.minLength, signal)
-          batchSets[idx] = new Set<string>(peps)
-          batchesDone++
-          setStep('intersect', {
-            progress: batchesDone / batches.length,
-            detail: fmtPercent(batchesDone, batches.length),
-          })
-        }
-      }
-
-      const sharedWorkerCount = Math.min(config.parallelRequests, batches.length)
-      await Promise.all(Array.from({ length: sharedWorkerCount }, sharedWorker))
-      const globalCore: Set<string> = batchSets.reduce((a, b) => intersectSets(a, b))
-      const core: string[] = [...globalCore].sort()
-      intersectionPeptides.value = core
-      setStep('intersect', {
-        status: 'done',
-        progress: 1,
-        detail: core.length === 0 ? 'No shared peptides' : `${fmtN(core.length)} shared peptides`,
-      })
-      addLog('info', `Global core peptidome size: ${fmtN(core.length)}`)
-
-      if (core.length === 0) {
-        addLog('info', 'No shared peptides found.')
-        setStep('lca', { status: 'skipped', detail: 'Skipped — empty intersection' })
-        if (!config.computePerTaxonUnique) {
-          setStep('filter', { status: 'skipped', detail: 'Skipped — empty intersection' })
-          status.value = 'done'
-          return
-        }
-        // Per-taxon computation can still find partial coverage or species-unique
-        // peptides even with an empty global core. Fall through to Step 5.
-      }
+      const core = await computeSharedPeptides(descendants, taxonRepo, cleavageRegex, signal);
 
       // ── Step 4: LCA lookup ──────────────────────────────────────────────────
-      if (core.length > 0) {
-        setStep('lca', { status: 'running', progress: null, detail: 'Querying Unipept pept2lca…' })
-        const { lcaByPeptide: lcaMap } = await taxonRepo.getLcas(
-          core, signal,
-          (done, total) => {
-            setStep('lca', { progress: done / total, detail: fmtPercent(done, total) })
-          },
-        )
-        const missing = core.filter((p) => !lcaMap.has(p))
-        for (const p of missing) addLog('warning', `No LCA returned for peptide: ${p}`)
-        lcaByPeptide.value = Object.fromEntries(lcaMap)
-        setStep('lca', { status: 'done', progress: 1, detail: `${fmtN(lcaMap.size)} LCAs retrieved` })
-      }
+      await lookupLcas(core, taxonRepo, signal);
 
       // ── Step 5: Uniqueness filter ───────────────────────────────────────────
       // Uses the unique_peptides endpoint to determine which peptides are globally
@@ -235,6 +333,12 @@ export const usePipelineStore = defineStore('pipeline', () => {
       // the species AND peptides unique to the parent taxon, so per-taxon jobs for
       // higher-level taxa simultaneously feed both the shared-unique union and the
       // partial-coverage maps without redundant calls.
+      if (core.length === 0 && !config.computePerTaxonUnique) {
+        setStep('filter', { status: 'skipped', detail: 'Skipped — empty intersection' })
+        status.value = 'done'
+        return
+      }
+
       const doShared = config.computeUniqueSharedPeptides
       const doPerTaxon = config.computePerTaxonUnique
 
@@ -274,14 +378,14 @@ export const usePipelineStore = defineStore('pipeline', () => {
         const coveredByHigherTaxon = new Set<number>()
 
         if (doPerTaxon) {
-          for (const taxId of valid) {
+          for (const taxId of validTaxa) {
             if (isLeaf(taxId)) {
               // Leaf: call for taxId itself with no parent.
               addJob(taxId, undefined)
             } else {
               // Higher-level: one call per species descendant with this taxon as parent.
               coverage[taxId] = {}
-              for (const speciesId of byTaxon[taxId] ?? []) {
+              for (const speciesId of descendantsPerTaxon[taxId] ?? []) {
                 coveredByHigherTaxon.add(speciesId)
                 addJob(speciesId, taxId)
               }
@@ -346,14 +450,14 @@ export const usePipelineStore = defineStore('pipeline', () => {
 
           const perTaxonResult: Record<number, string[]> = {}
           const perTaxonCoverageResult: Record<number, Record<string, number[]>> = {}
-          for (const taxId of valid) {
+          for (const taxId of validTaxa) {
             if (isLeaf(taxId)) {
               const peps = [...(uniquePerSpecies.get(taxId) ?? [])].sort()
               perTaxonResult[taxId] = peps
-              addLog('info', `${names[taxId] ?? taxId}: ${fmtN(peps.length)} unique peptides.`)
+              addLog('info', `${taxonNames.value[taxId] ?? taxId}: ${fmtN(peps.length)} unique peptides.`)
             } else {
               const cov = coverage[taxId] ?? {}
-              const totalDescendants = (byTaxon[taxId] ?? []).length
+              const totalDescendants = (descendantsPerTaxon[taxId] ?? []).length
               // Sort by coverage count descending, then alphabetically.
               const peps = Object.keys(cov).sort((a, b) => {
                 const diff = (cov[b]?.length ?? 0) - (cov[a]?.length ?? 0)
@@ -361,7 +465,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
               })
               perTaxonResult[taxId] = peps
               perTaxonCoverageResult[taxId] = cov
-              addLog('info', `${names[taxId] ?? taxId}: ${fmtN(peps.length)} partially covering peptides (across ${fmtN(totalDescendants)} descendant species).`)
+              addLog('info', `${taxonNames.value[taxId] ?? taxId}: ${fmtN(peps.length)} partially covering peptides (across ${fmtN(totalDescendants)} descendant species).`)
             }
           }
           perTaxonUniquePeptides.value = perTaxonResult
