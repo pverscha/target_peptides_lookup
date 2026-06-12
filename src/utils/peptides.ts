@@ -25,50 +25,6 @@ export function chunked<T>(array: T[], size: number): T[][] {
 }
 
 /**
- * Digest one protein sequence into tryptic peptides.
- * Mutates `out` — avoids allocating an intermediate Set per protein.
- */
-export function digestProtein(
-  sequence: string,
-  equateIL: boolean,
-  minLength: number,
-  out: Set<string>,
-  cleavageRe: RegExp = TRYPSIN_RE,
-): void {
-  const seq = equateIL ? sequence.replaceAll('I', 'L') : sequence
-  for (const frag of seq.split(cleavageRe)) {
-    if (frag.length >= minLength) out.add(frag)
-  }
-}
-
-/**
- * Keep peptides whose LCA lineage set contains a given single taxon.
- *
- * Correct only when `inputTaxonSet` has exactly one element. For a multi-taxon
- * global uniqueness check use `TaxonRepository.getUniquePeptides` (pept2taxa).
- * Returns a sorted array.
- */
-export function filterUnique(
-  peptides: string[],
-  lineageByPeptide: Map<string, Set<number>>,
-  inputTaxonSet: Set<number>,
-): string[] {
-  const kept: string[] = []
-  for (const pep of peptides) {
-    const ids = lineageByPeptide.get(pep)
-    if (ids) {
-      for (const id of ids) {
-        if (inputTaxonSet.has(id)) {
-          kept.push(pep)
-          break
-        }
-      }
-    }
-  }
-  return kept.sort()
-}
-
-/**
  * Parse a raw text block of taxon IDs (one per line, # comments allowed).
  * Returns validated IDs and any parse errors for inline UI display.
  */
@@ -103,8 +59,4 @@ export function unionSets<T>(sets: Iterable<Set<T>>): Set<T> {
   const result = new Set<T>()
   for (const s of sets) for (const v of s) result.add(v)
   return result
-}
-
-export function isLeafRank(rank: string | undefined): boolean {
-  return rank === 'species' || rank === 'strain'
 }

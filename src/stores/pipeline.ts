@@ -4,10 +4,11 @@ import type { PipelineStep, PipelineStatus, LogEntry, AnalysisSnapshot, TaxonSug
 import { useConfigStore } from './config'
 import { UnipeptService } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
-import { chunked, intersectSets, unionSets, isLeafRank } from '@/utils/peptides'
+import { chunked, intersectSets, unionSets } from '@/utils/peptides'
 import { fmtN, fmtPercent, formatLogLines } from '@/utils/format'
 import { downloadText } from '@/utils/download'
 import { isAbortError } from '@/utils/abort'
+import {isLeafRank} from "@/utils/taxa.ts";
 
 const LOG_UI_LIMIT = 100
 const SHARED_PEPTIDES_BATCH_SIZE = 20
@@ -207,16 +208,15 @@ export const usePipelineStore = defineStore('pipeline', () => {
    * Updates `intersectionPeptides` with the sorted result.
    *
    * @param descendants - Deduplicated species-level descendant taxon IDs.
+   * @param cleavageRegex
    * @param taxonRepo - Repository used to fetch shared peptides per batch.
-   * @param cleavageRegex - Regular expression used to cleave protein sequences
-   *   into peptides (e.g. `[KR](?!P)` for trypsin).
    * @param signal - AbortSignal to cancel the request.
    * @returns Sorted array of peptide sequences present in every descendant's proteome.
    */
   async function computeSharedPeptides(
     descendants: number[],
-    taxonRepo: TaxonRepository,
     cleavageRegex: string,
+    taxonRepo: TaxonRepository,
     signal: AbortSignal
   ) {
     setStep('intersect', { status: 'running', progress: null, detail: 'Requesting shared peptides…' })
@@ -291,6 +291,203 @@ export const usePipelineStore = defineStore('pipeline', () => {
     }
   }
 
+  /**
+   * Determines which shared core peptides are globally unique to the input taxon group.
+   *
+   * For each peptide in `core`, the Unipept `pept2taxa` endpoint returns every organism
+   * carrying that peptide. A peptide is globally unique when all species-level taxa
+   * returned by `pept2taxa` are members of the input group's species-level descendants.
+   * Peptides absent from the response or carrying species outside the allowed set are
+   * excluded from the result.
+   *
+   * Logs a warning for each peptide not found in the response and for each peptide for
+   * which `pept2taxa` applied a truncation cutoff (its species set may be incomplete,
+   * risking a false "unique" classification).
+   *
+   * Updates the `filter` step UI with progress and marks it `done` on completion.
+   *
+   * @param core - Sorted tryptic peptide sequences from the global core peptidome.
+   * @param descendants - All species-level descendant taxon IDs of the input taxa.
+   * @param taxonRepo - Repository used to query `pept2taxa`.
+   * @param signal - AbortSignal to cancel the request.
+   * @returns Sorted array of globally unique peptides (subset of `core`).
+   */
+  async function computeGloballyUniquePeptides(
+    core: string[],
+    descendants: number[],
+    taxonRepo: TaxonRepository,
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    setStep('filter', { status: 'running', progress: null, detail: 'Querying pept2taxa…' })
+
+    const { taxaByPeptide, cutoffPeptides } = await taxonRepo.getTaxa(
+      core,
+      signal,
+      (done, total) => setStep('filter', { progress: done / total, detail: fmtPercent(done, total) }),
+    )
+
+    const allowed = new Set(descendants)
+
+    const missing = core.filter((p) => !taxaByPeptide.has(p))
+    for (const p of missing) addLog('warning', `pept2taxa returned no result for peptide: ${p}`)
+
+    for (const p of cutoffPeptides) {
+      addLog('warning', `pept2taxa result truncated for peptide (cutoff applied): ${p} — uniqueness classification may be inaccurate`)
+    }
+
+    const unique = core.filter((p) => {
+      const sp = taxaByPeptide.get(p)
+      return sp !== undefined && sp.size > 0 && [...sp].every((id) => allowed.has(id))
+    })
+
+    return unique
+  }
+
+  /**
+   * Computes per-taxon unique and partially-covering peptides, then runs the
+   * globally-unique shared peptide filter. Directly updates the pipeline store
+   * refs `perTaxonUniquePeptides`, `perTaxonCoverage`, `perTaxonUniqueComputed`,
+   * `uniquePeptides`, and `uniqueSharedPeptidesComputed`, and advances the
+   * `filter` step UI.
+   *
+   * **Early-exit.** When `sharedPeptides` is empty and
+   * `config.computePerTaxonUnique` is disabled, the step is marked skipped and
+   * `status` is set to `done`; no API calls are made and the function returns
+   * `undefined`.
+   *
+   * **Per-taxon logic.** Input taxa are classified by rank:
+   *
+   * - *Leaf taxa* (species / strain): `getUniquePeptides` is called once for
+   *   the taxon ID without a parent. The returned `unique` set — peptides not
+   *   present in any other organism in Unipept — is stored in `uniquePerSpecies`.
+   *
+   * - *Higher-level taxa* (genus, family, …): `getUniquePeptides` is called for
+   *   every species-level descendant with the parent taxon ID. Each call returns
+   *   both `unique` (per-species strict-unique peptides, cached in
+   *   `uniquePerSpecies`) and `uniqueToParent` (peptides unique to the parent
+   *   but not strictly to the species). The `uniqueToParent` lists are aggregated
+   *   into a coverage map: `coverage[parentId][peptide]` is the list of
+   *   descendant species IDs in whose `uniqueToParent` response that peptide
+   *   appeared. The coverage percentage for a peptide is
+   *   `coverage[parentId][peptide].length / descendantsPerTaxon[parentId].length`.
+   *
+   * **Store assignment.**
+   * `perTaxonCoverage` receives the raw coverage map. `perTaxonUniquePeptides`
+   * is built per input taxon: leaf taxa get their sorted strict-unique list;
+   * higher-level taxa get their partially-covering peptides sorted by descending
+   * coverage count (tiebroken by peptide sequence). `perTaxonUniqueComputed` is
+   * set to `true` when at least one input taxon has a non-empty peptide list.
+   *
+   * **Globally-unique shared peptides.** After the per-taxon work, if
+   * `config.computeUniqueSharedPeptides` is enabled and `sharedPeptides` is
+   * non-empty, `computeGloballyUniquePeptides` is invoked and its result stored
+   * in `uniquePeptides`. Otherwise the filter step is marked skipped.
+   *
+   * @param validTaxa - NCBI taxon IDs confirmed to exist in Unipept.
+   * @param sharedPeptides - Global core peptidome (intersection across all descendants).
+   * @param descendants - Flat union of all species-level descendant IDs.
+   * @param descendantsPerTaxon - Maps each input taxon ID to its species-level descendant IDs.
+   * @param cleavageRegex - Regex used to digest proteins into peptides.
+   * @param taxonRepo - Repository for Unipept API calls.
+   * @param signal - AbortSignal to cancel in-flight requests.
+   */
+  async function computeUniqueAndPartialPeptides(
+    validTaxa: number[],
+    sharedPeptides: string[],
+    descendants: number[],
+    descendantsPerTaxon: Record<number, number[]>,
+    cleavageRegex: string,
+    taxonRepo: TaxonRepository,
+    signal: AbortSignal
+  ) {
+    if (sharedPeptides.length === 0 && !config.computePerTaxonUnique) {
+      setStep('filter', { status: 'skipped', detail: 'Skipped — empty intersection' })
+      status.value = 'done'
+      return
+    }
+
+    // Leaf classification: species and strain are leaf taxa (strict unique);
+    // anything else is a higher-level taxon (partial coverage via unique_to_parent).
+    // taxonRanks is populated from inputTaxa at the start of run().
+    const isLeafTaxon = (id: number): boolean => isLeafRank(taxonRanks.value[id]);
+
+    // uniquePerSpecies: strict-unique peptide set per species, populated at most
+    // once per species regardless of how many parent-taxon jobs reference it.
+    const uniquePerSpecies = new Map<number, Set<string>>();
+
+    // coverage[parentTaxId][peptide] = list of species IDs whose unique_to_parent
+    // contained this peptide (only for higher-level per-taxon taxa).
+    const coverage: Record<number, Record<string, number[]>> = {};
+
+    for (const parentId of validTaxa) {
+      if (isLeafTaxon(parentId)) {
+        // We should not pass the parent ID in this case, since the parent is already a species (and the
+        // "partial coverage" is undefined in that case).
+
+        const { unique } = await taxonRepo.getUniquePeptides(parentId, cleavageRegex, config.minLength, signal);
+
+        if (!uniquePerSpecies.has(parentId)) {
+          uniquePerSpecies.set(parentId, new Set(unique));
+        }
+      } else {
+        // Also retrieve all descendants for the given parent (since the parent is not a species)
+        coverage[parentId] = {};
+
+        for (const speciesId of descendantsPerTaxon[parentId]!) {
+          const { unique, uniqueToParent } = await taxonRepo.getUniquePeptides(speciesId, config.cleavageRegex, config.minLength, signal, parentId);
+
+          if (!uniquePerSpecies.has(speciesId)) {
+            uniquePerSpecies.set(speciesId, new Set(unique));
+          }
+
+          const cov = coverage[parentId]!
+          for (const pep of uniqueToParent) {
+            if (cov[pep] === undefined) {
+              cov[pep] = [];
+            }
+
+            cov[pep].push(speciesId)
+          }
+        }
+      }
+    }
+
+    // Populate per-taxon store refs from the computed results.
+    perTaxonCoverage.value = coverage;
+
+    const perTaxon: Record<number, string[]> = {}
+    for (const id of validTaxa) {
+      if (isLeafRank(taxonRanks.value[id])) {
+        // Leaf taxon (species/strain): strict-unique peptides, sorted for stable display.
+        perTaxon[id] = [...(uniquePerSpecies.get(id) ?? [])].sort()
+      } else {
+        // Higher-level taxon: partially-covering peptides ordered by descendant
+        // coverage (desc), with peptide sequence as tiebreaker.
+        const cov = coverage[id] ?? {}
+
+        perTaxon[id] = Object.keys(cov).sort(
+            (a, b) => (cov[b]!.length - cov[a]!.length) || a.localeCompare(b)
+        )
+      }
+    }
+    perTaxonUniquePeptides.value = perTaxon;
+
+    // Mark the per-taxon section as computed so the UI accordion renders.
+    perTaxonUniqueComputed.value = Object.values(perTaxon).some((list) => list.length > 0);
+
+    if (config.computeUniqueSharedPeptides && sharedPeptides.length > 0) {
+      uniquePeptides.value = await computeGloballyUniquePeptides(sharedPeptides, descendants, taxonRepo, signal)
+      uniqueSharedPeptidesComputed.value = true
+      setStep('filter', { status: 'done', progress: 1, detail: `${fmtN(uniquePeptides.value.length)} globally unique` })
+      addLog('info', `Globally unique peptides: ${fmtN(uniquePeptides.value.length)}`)
+    } else {
+      setStep('filter', {
+        status: 'skipped',
+        detail: sharedPeptides.length === 0 ? 'Skipped — empty intersection' : 'Skipped — uniqueness filter disabled',
+      })
+    }
+  }
+
   async function run(taxa: TaxonSuggestion[]) {
     if (status.value === 'running') return
 
@@ -314,172 +511,22 @@ export const usePipelineStore = defineStore('pipeline', () => {
     const cleavageRegex = config.cleavageMethod === 'tryptic' ? '[KR](?!P)' : config.cleavageRegex
 
     try {
-      // ── Step 1: Validate ────────────────────────────────────────────────────
+      // Step 1: Validate input taxa
       const validTaxa = await validateInputTaxa(inputTaxaIds, taxonRepo, signal);
 
-      // ── Step 2: Descendants ─────────────────────────────────────────────────
+      // Step 2: Compute descendants at species and strain level
       const { descendants, descendantsPerTaxon } = await computeDescendants(validTaxa, taxonRepo, signal);
 
       // ── Step 3: Compute shared peptides ─────────────────────────────────────
-      const core = await computeSharedPeptides(descendants, taxonRepo, cleavageRegex, signal);
+      const sharedPeptides = await computeSharedPeptides(descendants, cleavageRegex, taxonRepo, signal);
 
       // ── Step 4: LCA lookup ──────────────────────────────────────────────────
-      await lookupLcas(core, taxonRepo, signal);
+      await lookupLcas(sharedPeptides, taxonRepo, signal);
 
       // ── Step 5: Uniqueness filter ───────────────────────────────────────────
-      // Uses the unique_peptides endpoint to determine which peptides are globally
-      // unique to at least one species descendant. One request is issued per
-      // (species, parent) pair. A single call returns both strict-unique peptides for
-      // the species AND peptides unique to the parent taxon, so per-taxon jobs for
-      // higher-level taxa simultaneously feed both the shared-unique union and the
-      // partial-coverage maps without redundant calls.
-      if (core.length === 0 && !config.computePerTaxonUnique) {
-        setStep('filter', { status: 'skipped', detail: 'Skipped — empty intersection' })
-        status.value = 'done'
-        return
-      }
+      await computeUniqueAndPartialPeptides(validTaxa, sharedPeptides, descendants, descendantsPerTaxon, cleavageRegex, taxonRepo, signal);
 
-      const doShared = config.computeUniqueSharedPeptides
-      const doPerTaxon = config.computePerTaxonUnique
-
-      if (!doShared && !doPerTaxon) {
-        setStep('filter', { status: 'skipped', detail: 'Both computations disabled' })
-      } else {
-        setStep('filter', { status: 'running', progress: null, detail: 'Computing…' })
-
-        // Leaf classification: species and strain are leaf taxa (strict unique);
-        // anything else is a higher-level taxon (partial coverage via unique_to_parent).
-        // taxonRanks is populated from inputTaxa at the start of run().
-        const isLeaf = (id: number): boolean => isLeafRank(taxonRanks.value[id])
-
-        // uniquePerSpecies: strict-unique peptide set per species, populated at most
-        // once per species regardless of how many parent-taxon jobs reference it.
-        const uniquePerSpecies = new Map<number, Set<string>>()
-
-        // coverage[parentTaxId][peptide] = list of species IDs whose unique_to_parent
-        // contained this peptide (only for higher-level per-taxon taxa).
-        const coverage: Record<number, Record<string, number[]>> = {}
-
-        // Build the flat job list. Each job is [speciesId, parentId | undefined].
-        // We deduplicate strictly: a (speciesId, parentId) job is added at most once.
-        type Job = [speciesId: number, parentId: number | undefined]
-        const jobs: Job[] = []
-        const jobKeys = new Set<string>()
-        const addJob = (speciesId: number, parentId?: number): void => {
-          const key = `${speciesId}:${parentId ?? ''}`
-          if (!jobKeys.has(key)) {
-            jobKeys.add(key)
-            jobs.push([speciesId, parentId])
-          }
-        }
-
-        // Species covered by a higher-level parent job (their unique[] comes back in the
-        // same response, so no extra parent-less call is needed for doShared).
-        const coveredByHigherTaxon = new Set<number>()
-
-        if (doPerTaxon) {
-          for (const taxId of validTaxa) {
-            if (isLeaf(taxId)) {
-              // Leaf: call for taxId itself with no parent.
-              addJob(taxId, undefined)
-            } else {
-              // Higher-level: one call per species descendant with this taxon as parent.
-              coverage[taxId] = {}
-              for (const speciesId of descendantsPerTaxon[taxId] ?? []) {
-                coveredByHigherTaxon.add(speciesId)
-                addJob(speciesId, taxId)
-              }
-            }
-          }
-        }
-
-        if (doShared) {
-          // Ensure every descendant species has its strict-unique peptides retrieved for
-          // the shared-unique union. Parent-taxon jobs already return unique[] for covered
-          // species, so only add parent-less jobs for the remainder.
-          for (const speciesId of descendants) {
-            if (!coveredByHigherTaxon.has(speciesId)) {
-              addJob(speciesId, undefined)
-            }
-          }
-        }
-
-        const total = jobs.length
-        let uDone = 0
-        let uNextIdx = 0
-
-        const uWorker = async (): Promise<void> => {
-          let idx: number
-          while ((idx = uNextIdx++) < total) {
-            const [speciesId, parentId] = jobs[idx]!
-            const { unique, uniqueToParent } = await taxonRepo.getUniquePeptides(
-              speciesId, cleavageRegex, config.minLength, signal, parentId,
-            )
-            // Store strict-unique (parent-independent) at most once per species.
-            if (!uniquePerSpecies.has(speciesId)) {
-              uniquePerSpecies.set(speciesId, new Set(unique))
-            }
-            // Accumulate partial-coverage data when a parent was provided.
-            if (parentId !== undefined && coverage[parentId] !== undefined) {
-              const cov = coverage[parentId]!
-              for (const pep of uniqueToParent) {
-                if (cov[pep] === undefined) cov[pep] = []
-                cov[pep]!.push(speciesId)
-              }
-            }
-            uDone++
-            setStep('filter', {
-              progress: uDone / total,
-              detail: fmtPercent(uDone, total),
-            })
-          }
-        }
-
-        const uWorkerCount = Math.min(config.parallelRequests, Math.max(total, 1))
-        await Promise.all(Array.from({ length: uWorkerCount }, uWorker))
-
-        if (doShared) {
-          const uniqueUnion = unionSets(uniquePerSpecies.values())
-          const unique = core.filter((p) => uniqueUnion.has(p)).sort()
-          uniquePeptides.value = unique
-          uniqueSharedPeptidesComputed.value = true
-          addLog('info', `${fmtN(unique.length)} shared unique peptides after filter.`)
-        }
-
-        if (doPerTaxon) {
-
-          const perTaxonResult: Record<number, string[]> = {}
-          const perTaxonCoverageResult: Record<number, Record<string, number[]>> = {}
-          for (const taxId of validTaxa) {
-            if (isLeaf(taxId)) {
-              const peps = [...(uniquePerSpecies.get(taxId) ?? [])].sort()
-              perTaxonResult[taxId] = peps
-              addLog('info', `${taxonNames.value[taxId] ?? taxId}: ${fmtN(peps.length)} unique peptides.`)
-            } else {
-              const cov = coverage[taxId] ?? {}
-              const totalDescendants = (descendantsPerTaxon[taxId] ?? []).length
-              // Sort by coverage count descending, then alphabetically.
-              const peps = Object.keys(cov).sort((a, b) => {
-                const diff = (cov[b]?.length ?? 0) - (cov[a]?.length ?? 0)
-                return diff !== 0 ? diff : a.localeCompare(b)
-              })
-              perTaxonResult[taxId] = peps
-              perTaxonCoverageResult[taxId] = cov
-              addLog('info', `${taxonNames.value[taxId] ?? taxId}: ${fmtN(peps.length)} partially covering peptides (across ${fmtN(totalDescendants)} descendant species).`)
-            }
-          }
-          perTaxonUniquePeptides.value = perTaxonResult
-          perTaxonCoverage.value = perTaxonCoverageResult
-          perTaxonUniqueComputed.value = true
-        }
-
-        const parts: string[] = []
-        if (doShared) parts.push(`${fmtN(uniquePeptides.value.length)} shared unique`)
-        if (doPerTaxon) parts.push('per-taxon computed')
-        setStep('filter', { status: 'done', progress: 1, detail: parts.join('; ') })
-      }
       status.value = 'done'
-
     } catch (err: unknown) {
       if (isAbortError(err)) {
         status.value = 'cancelled'

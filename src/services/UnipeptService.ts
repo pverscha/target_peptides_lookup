@@ -8,6 +8,14 @@ interface TaxonEntry {
   descendants?: number[]
 }
 
+interface TaxaEntry {
+  peptide: string
+  taxon_id: number
+  taxon_name?: string
+  taxon_rank: string
+  cutoff_used?: boolean
+}
+
 interface LcaEntry {
   peptide: string
   taxon_id: number
@@ -188,6 +196,76 @@ export class UnipeptService {
     await Promise.all(Array.from({ length: workerCount }, worker))
 
     return { lineageByPeptide, lcaByPeptide }
+  }
+
+  /**
+   * Fetches the species-level taxa for each peptide via the Unipept pept2taxa endpoint.
+   *
+   * Peptides are batched by `lcaBatchSize` and queried in parallel (up to
+   * `parallelRequests` concurrent workers). For each returned row with
+   * `taxon_rank === 'species'`, the `taxon_id` is added to the set for that peptide.
+   * Peptides that match only organisms at other ranks (strain, no_rank, etc.) will have
+   * an empty set; peptides not found in Unipept are absent from the map entirely.
+   *
+   * @param peptides - Tryptic peptide sequences to look up.
+   * @param signal - Abort signal; rejects the returned promise on abort.
+   * @param onProgress - Optional callback invoked after each batch completes, with
+   *   the number of completed batches and the total batch count.
+   * @returns Map from peptide sequence to the set of species-level taxon IDs in which
+   *   the peptide occurs, plus a set of peptides for which `cutoff_used` was true
+   *   (results may be truncated for those peptides).
+   */
+  async lookupTaxa(
+    peptides: string[],
+    signal: AbortSignal,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<{ taxaByPeptide: Map<string, Set<number>>; cutoffPeptides: Set<string> }> {
+    const taxaByPeptide = new Map<string, Set<number>>()
+    const cutoffPeptides = new Set<string>()
+    const chunks = chunked(peptides, this.config.lcaBatchSize)
+    const total = chunks.length
+    let completedChunks = 0
+    let nextIdx = 0
+
+    const processChunk = async (chunk: string[]): Promise<void> => {
+      const params = new URLSearchParams()
+      for (const pep of chunk) params.append('input[]', pep)
+      params.append('equate_il', String(this.config.equateIL))
+
+      const res = await this.fetchWithRetry(
+        `${this.config.unipeptUrl}/api/v2/pept2taxa.json`,
+        { method: 'POST', body: params },
+        signal,
+      )
+      const data: TaxaEntry[] = await res.json()
+
+      for (const entry of data) {
+        if (!taxaByPeptide.has(entry.peptide)) {
+          taxaByPeptide.set(entry.peptide, new Set<number>())
+        }
+        if (entry.taxon_rank === 'species') {
+          taxaByPeptide.get(entry.peptide)!.add(entry.taxon_id)
+        }
+        if (entry.cutoff_used) {
+          cutoffPeptides.add(entry.peptide)
+        }
+      }
+
+      completedChunks++
+      onProgress?.(completedChunks, total)
+    }
+
+    const worker = async (): Promise<void> => {
+      let idx: number
+      while ((idx = nextIdx++) < chunks.length) {
+        await processChunk(chunks[idx]!)
+      }
+    }
+
+    const workerCount = Math.min(this.config.parallelRequests, chunks.length)
+    await Promise.all(Array.from({ length: workerCount }, worker))
+
+    return { taxaByPeptide, cutoffPeptides }
   }
 
   async computeSharedPeptides(

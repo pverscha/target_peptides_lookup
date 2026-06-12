@@ -4,7 +4,7 @@ import { usePipelineStore } from '@/stores/pipeline'
 import { useConfigStore } from '@/stores/config'
 import { fmtN, fmtPercent } from '@/utils/format'
 import { downloadText } from '@/utils/download'
-import { isLeafRank } from '@/utils/peptides'
+import { isLeafRank } from '@/utils/taxa'
 import NotComputedCard from './NotComputedCard.vue'
 
 const pipeline = usePipelineStore()

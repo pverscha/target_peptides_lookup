@@ -146,6 +146,34 @@ export class TaxonRepository {
   }
 
   /**
+   * Fetches the set of species-level taxon IDs in which each peptide occurs.
+   *
+   * Calls the Unipept `pept2taxa` endpoint; for each returned organism row with
+   * `taxon_rank === 'species'`, its `taxon_id` is added to the set for that
+   * peptide. Peptides found in Unipept but matched only to non-species ranks
+   * (strain, no_rank, etc.) will have an empty set. Peptides not found in
+   * Unipept are absent from the map entirely.
+   *
+   * The `cutoffPeptides` set contains any peptides for which the API applied
+   * a truncation cutoff (matched more than ~10 000 proteins); their species sets
+   * may be incomplete and should be flagged to the user.
+   *
+   * @param peptides - Tryptic peptide sequences to look up.
+   * @param signal - Abort signal; rejects the returned promise on abort.
+   * @param onProgress - Optional callback invoked after each batch completes, with
+   *   the number of completed batches and the total batch count.
+   * @returns Object with `taxaByPeptide` (maps each peptide to its species-level taxon
+   *   ID set) and `cutoffPeptides` (set of peptides that hit the response size limit).
+   */
+  getTaxa(
+    peptides: string[],
+    signal: AbortSignal,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<{ taxaByPeptide: Map<string, Set<number>>; cutoffPeptides: Set<string> }> {
+    return this.unipept.lookupTaxa(peptides, signal, onProgress)
+  }
+
+  /**
    * Fetches one page of taxa matching a text query against Unipept.
    *
    * The filter string is matched against taxon name, NCBI ID, and rank
