@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import type { DataTableHeader } from 'vuetify'
 import { usePipelineStore } from '@/stores/pipeline'
 import { useConfigStore } from '@/stores/config'
 import { fmtN, fmtPercent } from '@/utils/format'
@@ -36,6 +37,13 @@ interface CoverageItem {
   total: number
   pct: string
 }
+
+const partialCoverageHeaders: DataTableHeader[] = [
+  { title: 'Peptide',                     align: 'start', value: 'peptide', sortable: true, width: '40%' },
+  { title: 'Matching species',            align: 'end',   value: 'count',   sortable: true, width: '20%' },
+  { title: 'Total species',               align: 'end',   value: 'total',   sortable: true, width: '20%' },
+  { title: 'Partial coverage percentage', align: 'end',   value: 'pct',     sortable: true, width: '20%' },
+]
 
 /** Coverage rows for a higher-level taxon, already in display order (stored sort). */
 function perTaxonCoverageItems(id: number): CoverageItem[] {
@@ -212,28 +220,25 @@ function runUniqueSharedAnalysis() {
               <!-- ── Higher-level taxon: partially-covering peptides with coverage ── -->
               <template v-if="isPartial(taxId)">
                 <template v-if="perTaxonPeptides(taxId).length > 0">
-                  <v-sheet rounded border style="max-height: 320px; overflow-y: auto;" class="mb-3">
-                    <v-virtual-scroll
-                      :items="perTaxonCoverageItems(taxId)"
-                      item-height="32"
-                      style="max-height: 320px;"
-                    >
-                      <template #default="{ item }">
-                        <div class="d-flex align-center px-3 py-1 ga-3" style="min-height: 32px;">
-                          <span class="text-body-2 font-mono text-mono flex-shrink-0">{{ item.peptide }}</span>
-                          <v-spacer />
-                          <v-chip
-                            size="x-small"
-                            color="warning"
-                            variant="tonal"
-                            :title="`Present in ${item.count} of ${item.total} descendant species`"
-                          >
-                            {{ item.count }}/{{ item.total }} ({{ item.pct }})
-                          </v-chip>
-                        </div>
-                      </template>
-                    </v-virtual-scroll>
-                  </v-sheet>
+                  <v-data-table
+                    :headers="partialCoverageHeaders"
+                    :items="perTaxonCoverageItems(taxId)"
+                    :items-per-page="10"
+                    density="compact"
+                    color="primary"
+                    class="mb-3 partial-coverage-table"
+                  >
+                    <template #item.peptide="{ item }">
+                      <v-tooltip :text="item.peptide" location="top">
+                        <template #activator="{ props }">
+                          <span v-bind="props" class="font-mono text-mono peptide-cell">{{ item.peptide }}</span>
+                        </template>
+                      </v-tooltip>
+                    </template>
+                    <template #item.pct="{ item }">
+                      {{ item.pct }}
+                    </template>
+                  </v-data-table>
                   <v-btn
                     size="small"
                     color="primary"
@@ -423,3 +428,16 @@ function runUniqueSharedAnalysis() {
     </v-card>
   </template>
 </template>
+
+<style scoped>
+.partial-coverage-table :deep(table) {
+  table-layout: fixed;
+}
+.peptide-cell {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+</style>
