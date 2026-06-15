@@ -110,39 +110,50 @@ export class TaxonRepository {
   }
 
   /**
-   * Returns the peptides that are globally unique to `taxonId`, and optionally
-   * the peptides unique to a parent taxon that contains `taxonId`.
-   *
-   * The taxon must be at species or strain rank. The implementation calls the
-   * count endpoint first, then fans out sequential GET requests over disjoint
-   * protein ranges of size UNIQUE_PEPTIDES_BATCH_SIZE. Results are merged by
-   * set union (classification is deterministic per peptide across batches).
-   *
-   * When `parentId` is provided, the response additionally contains
-   * `uniqueToParent`: peptides that are not strictly unique to `taxonId` but
-   * are unique to the parent taxon `parentId`. This allows computing partial
-   * coverage for higher-level taxa: call once per species descendant with the
-   * parent taxon ID, then aggregate `uniqueToParent` across all descendants.
+   * Returns the number of proteins associated with `taxonId` in Unipept.
+   * Used to determine how many range requests are needed before fetching
+   * unique peptides in batches.
    *
    * @param taxonId - NCBI taxon ID at species or strain rank.
+   * @param signal - Abort signal; rejects the returned promise on abort.
+   * @returns Total protein count for the taxon.
+   */
+  getUniquePeptidesCount(taxonId: number, signal: AbortSignal): Promise<number> {
+    return this.unipept.fetchUniquePeptidesCount(taxonId, signal)
+  }
+
+  /**
+   * Fetches the unique peptides for a single protein index range of `taxonId`.
+   *
+   * This is the low-level building block used by the pipeline's count → plan →
+   * execute pattern. The caller is responsible for determining the valid range
+   * based on the protein count returned by `getUniquePeptidesCount`.
+   *
+   * When `parentId` is provided, the response also includes `uniqueToParent`:
+   * peptides unique to the parent taxon but not strictly to `taxonId`.
+   *
+   * @param taxonId - NCBI taxon ID at species or strain rank.
+   * @param start - Zero-based start index of the protein range (inclusive).
+   * @param end - End index of the protein range (exclusive).
    * @param cleavageRegex - Regular expression used to cleave protein sequences
    *   into peptides (e.g. `[KR](?!P)` for trypsin).
    * @param minLength - Minimum peptide length; shorter fragments are discarded.
    * @param signal - Abort signal; rejects the returned promise on abort.
    * @param parentId - Optional NCBI taxon ID of the parent (higher-level) taxon.
-   *   When provided, the response also includes `uniqueToParent`.
    * @returns Object with `unique` (peptides globally unique to `taxonId`) and
    *   `uniqueToParent` (peptides unique to `parentId` but not strictly to `taxonId`;
    *   empty array when `parentId` is omitted).
    */
-  getUniquePeptides(
+  getUniquePeptidesRange(
     taxonId: number,
+    start: number,
+    end: number,
     cleavageRegex: string,
     minLength: number,
     signal: AbortSignal,
     parentId?: number,
   ): Promise<{ unique: string[]; uniqueToParent: string[] }> {
-    return this.unipept.computeUniquePeptides(taxonId, cleavageRegex, minLength, signal, parentId)
+    return this.unipept.fetchUniquePeptidesRange(taxonId, start, end, cleavageRegex, minLength, signal, parentId)
   }
 
   /**

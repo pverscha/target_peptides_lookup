@@ -2,13 +2,14 @@ import { defineStore } from 'pinia'
 import { ref, readonly, computed } from 'vue'
 import type { PipelineStep, PipelineStatus, LogEntry, AnalysisSnapshot, TaxonSuggestion } from '@/types'
 import { useConfigStore } from './config'
-import { UnipeptService } from '@/services/UnipeptService'
+import { UnipeptService, UNIQUE_PEPTIDES_BATCH_SIZE } from '@/services/UnipeptService'
 import { TaxonRepository } from '@/repositories/TaxonRepository'
 import { chunked, intersectSets, unionSets } from '@/utils/peptides'
 import { fmtN, fmtPercent, formatLogLines } from '@/utils/format'
 import { downloadText } from '@/utils/download'
 import { isAbortError } from '@/utils/abort'
-import {isLeafRank} from "@/utils/taxa.ts";
+import { isLeafRank } from "@/utils/taxa.ts"
+import { RequestPool } from '@/utils/RequestPool'
 
 const LOG_UI_LIMIT = 100
 const SHARED_PEPTIDES_BATCH_SIZE = 20
@@ -406,50 +407,93 @@ export const usePipelineStore = defineStore('pipeline', () => {
       return
     }
 
-    // Leaf classification: species and strain are leaf taxa (strict unique);
-    // anything else is a higher-level taxon (partial coverage via unique_to_parent).
-    // taxonRanks is populated from inputTaxa at the start of run().
-    const isLeafTaxon = (id: number): boolean => isLeafRank(taxonRanks.value[id]);
+    const isLeafTaxon = (id: number): boolean => isLeafRank(taxonRanks.value[id])
 
-    // uniquePerSpecies: strict-unique peptide set per species, populated at most
-    // once per species regardless of how many parent-taxon jobs reference it.
-    const uniquePerSpecies = new Map<number, Set<string>>();
-
-    // coverage[parentTaxId][peptide] = list of species IDs whose unique_to_parent
-    // contained this peptide (only for higher-level per-taxon taxa).
-    const coverage: Record<number, Record<string, number[]>> = {};
+    // === Phase 1: Count ===
+    // Build the flat list of (taxonId, parentId?) jobs and fetch protein counts
+    // concurrently so we know how many page requests each taxon will need.
+    type TaxonJob = { taxonId: number; parentId?: number }
+    const taxonJobs: TaxonJob[] = []
 
     for (const parentId of validTaxa) {
       if (isLeafTaxon(parentId)) {
-        // We should not pass the parent ID in this case, since the parent is already a species (and the
-        // "partial coverage" is undefined in that case).
-
-        const { unique } = await taxonRepo.getUniquePeptides(parentId, cleavageRegex, config.minLength, signal);
-
-        if (!uniquePerSpecies.has(parentId)) {
-          uniquePerSpecies.set(parentId, new Set(unique));
-        }
+        taxonJobs.push({ taxonId: parentId })
       } else {
-        // Also retrieve all descendants for the given parent (since the parent is not a species)
-        coverage[parentId] = {};
-
         for (const speciesId of descendantsPerTaxon[parentId]!) {
-          const { unique, uniqueToParent } = await taxonRepo.getUniquePeptides(speciesId, config.cleavageRegex, config.minLength, signal, parentId);
-
-          if (!uniquePerSpecies.has(speciesId)) {
-            uniquePerSpecies.set(speciesId, new Set(unique));
-          }
-
-          const cov = coverage[parentId]!
-          for (const pep of uniqueToParent) {
-            if (cov[pep] === undefined) {
-              cov[pep] = [];
-            }
-
-            cov[pep].push(speciesId)
-          }
+          taxonJobs.push({ taxonId: speciesId, parentId })
         }
       }
+    }
+
+    // Count is independent of parentId — deduplicate by taxonId.
+    const uniqueTaxonIds = [...new Set(taxonJobs.map((j) => j.taxonId))]
+
+    setStep('filter', { status: 'running', progress: null, detail: 'Fetching protein counts…' })
+    const countPool = new RequestPool(config.parallelRequests)
+    const countResults = await countPool.execute(
+      uniqueTaxonIds,
+      (taxonId) => taxonRepo.getUniquePeptidesCount(taxonId, signal),
+      (done, total) => setStep('filter', { progress: done / total, detail: `Fetching protein counts… ${fmtPercent(done, total)}` }),
+    )
+
+    const countByTaxon = new Map(uniqueTaxonIds.map((id, i) => [id, countResults[i] ?? 0]))
+
+    // === Phase 2: Plan ===
+    // From the counts, build the complete flat list of page requests up front.
+    type PageRequest = TaxonJob & { start: number; end: number }
+    const pageRequests: PageRequest[] = []
+
+    for (const job of taxonJobs) {
+      const count = countByTaxon.get(job.taxonId) ?? 0
+      for (let start = 0; start < count; start += UNIQUE_PEPTIDES_BATCH_SIZE) {
+        pageRequests.push({ ...job, start, end: start + UNIQUE_PEPTIDES_BATCH_SIZE })
+      }
+    }
+
+    // === Phase 3: Execute ===
+    // Run all page requests concurrently, bounded by config.parallelRequests.
+    setStep('filter', { progress: null, detail: 'Fetching unique peptides…' })
+    const pagePool = new RequestPool(config.parallelRequests)
+    const pageResults = await pagePool.execute(
+      pageRequests,
+      (req) => taxonRepo.getUniquePeptidesRange(req.taxonId, req.start, req.end, cleavageRegex, config.minLength, signal, req.parentId),
+      (done, total) => setStep('filter', { progress: done / total, detail: `Fetching unique peptides… ${fmtPercent(done, total)}` }),
+    )
+
+    // === Phase 4: Aggregate ===
+    const uniquePerSpecies = new Map<number, Set<string>>()
+    // Use Set<number> during aggregation to deduplicate species IDs in O(1) per insert.
+    const coverageSets: Record<number, Record<string, Set<number>>> = {}
+
+    for (const parentId of validTaxa) {
+      if (!isLeafTaxon(parentId)) coverageSets[parentId] = {}
+    }
+
+    for (let i = 0; i < pageRequests.length; i++) {
+      const req = pageRequests[i]!
+      const result = pageResults[i]
+      if (!result) continue
+
+      if (!uniquePerSpecies.has(req.taxonId)) {
+        uniquePerSpecies.set(req.taxonId, new Set())
+      }
+      for (const p of result.unique) uniquePerSpecies.get(req.taxonId)!.add(p)
+
+      if (req.parentId !== undefined) {
+        const cov = coverageSets[req.parentId]!
+        for (const p of result.uniqueToParent) {
+          if (cov[p] === undefined) cov[p] = new Set()
+          cov[p].add(req.taxonId)
+        }
+      }
+    }
+
+    // Convert Set<number> → number[] for the store type.
+    const coverage: Record<number, Record<string, number[]>> = {}
+    for (const [parentId, pepMap] of Object.entries(coverageSets)) {
+      coverage[Number(parentId)] = Object.fromEntries(
+        Object.entries(pepMap).map(([pep, ids]) => [pep, [...ids]])
+      )
     }
 
     // Populate per-taxon store refs from the computed results.
