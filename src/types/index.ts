@@ -36,7 +36,7 @@ export interface LogEntry {
   timestamp: Date
 }
 
-export type PipelineStatus = 'idle' | 'running' | 'done' | 'error' | 'cancelled'
+export type PipelineStatus = 'idle' | 'running' | 'paused' | 'interrupted' | 'done' | 'error' | 'cancelled'
 
 export interface TaxonSuggestion {
   id: number

@@ -10,16 +10,24 @@ import { downloadText } from '@/utils/download'
 import { isAbortError } from '@/utils/abort'
 import { isLeafRank } from "@/utils/taxa.ts"
 import { RequestPool } from '@/utils/RequestPool'
+import { PauseController } from '@/utils/PauseController'
+import { RetryController } from '@/utils/RetryController'
 
 const LOG_UI_LIMIT = 100
 const SHARED_PEPTIDES_BATCH_SIZE = 20
+
+// A run is "active" while it is still in progress (including when suspended);
+// "finished" once it has reached a terminal state. Shared with usePipelineStatus.
+export const ACTIVE_STATUSES: PipelineStatus[] = ['running', 'paused', 'interrupted']
+export const FINISHED_STATUSES: PipelineStatus[] = ['done', 'error', 'cancelled']
 
 const STEP_DEFS = [
   { id: 'validate',    label: 'Validate taxon IDs' },
   { id: 'descendants', label: 'Collect species-level descendants' },
   { id: 'intersect',   label: 'Compute shared peptides' },
   { id: 'lca',         label: 'Look up LCAs' },
-  { id: 'filter',      label: 'Apply uniqueness filter' },
+  { id: 'protein_counts',  label: 'Fetching protein counts' },
+  { id: 'peptide_coverage', label: 'Computing peptide coverage' },
 ] as const
 
 type StepId = typeof STEP_DEFS[number]['id']
@@ -83,6 +91,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
   const _restoredFromHistory = ref(false)
 
   let abortController: AbortController | null = null
+  let pauseController: PauseController | null = null
+  let retryController: RetryController | null = null
 
   function setStep(id: StepId, patch: Partial<PipelineStep>) {
     steps.value = steps.value.map((s) => (s.id === id ? { ...s, ...patch } : s))
@@ -222,26 +232,16 @@ export const usePipelineStore = defineStore('pipeline', () => {
   ) {
     setStep('intersect', { status: 'running', progress: null, detail: 'Requesting shared peptides…' })
     const batches = chunked(descendants, SHARED_PEPTIDES_BATCH_SIZE)
-    let batchesDone = 0
-    let nextBatchIdx = 0
-    const batchSets: Set<string>[] = new Array(batches.length)
 
-    const sharedWorker = async (): Promise<void> => {
-      let idx: number
-      while ((idx = nextBatchIdx++) < batches.length) {
-        const peps = await taxonRepo.getSharedPeptides(batches[idx]!, cleavageRegex, config.minLength, signal)
-        batchSets[idx] = new Set<string>(peps)
-        batchesDone++
-        setStep('intersect', {
-          progress: batchesDone / batches.length,
-          detail: fmtPercent(batchesDone, batches.length),
-        })
-      }
-    }
+    const pool = new RequestPool(config.parallelRequests, pauseController)
+    const batchSets = await pool.execute(
+      batches,
+      (batch) => taxonRepo.getSharedPeptides(batch, cleavageRegex, config.minLength, signal)
+        .then(peps => new Set<string>(peps)),
+      (done, total) => setStep('intersect', { progress: done / total, detail: fmtPercent(done, total) }),
+    )
 
-    const sharedWorkerCount = Math.min(config.parallelRequests, batches.length)
-    await Promise.all(Array.from({ length: sharedWorkerCount }, sharedWorker))
-    const globalCore: Set<string> = batchSets.reduce((a, b) => intersectSets(a, b))
+    const globalCore: Set<string> = batchSets.filter((s): s is Set<string> => s !== null).reduce((a, b) => intersectSets(a, b))
     const core: string[] = [...globalCore].sort()
     intersectionPeptides.value = core
 
@@ -319,12 +319,12 @@ export const usePipelineStore = defineStore('pipeline', () => {
     taxonRepo: TaxonRepository,
     signal: AbortSignal,
   ): Promise<string[]> {
-    setStep('filter', { status: 'running', progress: null, detail: 'Querying pept2taxa…' })
+    setStep('peptide_coverage', { status: 'running', progress: null, detail: 'Querying pept2taxa…' })
 
     const { taxaByPeptide, cutoffPeptides } = await taxonRepo.getTaxa(
       core,
       signal,
-      (done, total) => setStep('filter', { progress: done / total, detail: fmtPercent(done, total) }),
+      (done, total) => setStep('peptide_coverage', { progress: done / total, detail: fmtPercent(done, total) }),
     )
 
     const allowed = new Set(descendants)
@@ -402,7 +402,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     signal: AbortSignal
   ) {
     if (sharedPeptides.length === 0 && !config.computePerTaxonUnique) {
-      setStep('filter', { status: 'skipped', detail: 'Skipped — empty intersection' })
+      setStep('protein_counts', { status: 'skipped', detail: 'Skipped — empty intersection' })
+      setStep('peptide_coverage', { status: 'skipped', detail: 'Skipped — empty intersection' })
       status.value = 'done'
       return
     }
@@ -428,15 +429,16 @@ export const usePipelineStore = defineStore('pipeline', () => {
     // Count is independent of parentId — deduplicate by taxonId.
     const uniqueTaxonIds = [...new Set(taxonJobs.map((j) => j.taxonId))]
 
-    setStep('filter', { status: 'running', progress: null, detail: 'Fetching protein counts…' })
-    const countPool = new RequestPool(config.parallelRequests)
+    setStep('protein_counts', { status: 'running', progress: null, detail: 'Fetching protein counts…' })
+    const countPool = new RequestPool(config.parallelRequests, pauseController)
     const countResults = await countPool.execute(
       uniqueTaxonIds,
       (taxonId) => taxonRepo.getUniquePeptidesCount(taxonId, signal),
-      (done, total) => setStep('filter', { progress: done / total, detail: `Fetching protein counts… ${fmtPercent(done, total)}` }),
+      (done, total) => setStep('protein_counts', { progress: done / total, detail: `Fetching protein counts… ${fmtPercent(done, total)}` }),
     )
 
     const countByTaxon = new Map(uniqueTaxonIds.map((id, i) => [id, countResults[i] ?? 0]))
+    setStep('protein_counts', { status: 'done', progress: 1, detail: '' })
 
     // === Phase 2: Plan ===
     // From the counts, build the complete flat list of page requests up front.
@@ -452,12 +454,12 @@ export const usePipelineStore = defineStore('pipeline', () => {
 
     // === Phase 3: Execute ===
     // Run all page requests concurrently, bounded by config.parallelRequests.
-    setStep('filter', { progress: null, detail: 'Fetching unique peptides…' })
-    const pagePool = new RequestPool(config.parallelRequests)
+    setStep('peptide_coverage', { status: 'running', progress: null, detail: 'Fetching unique peptides…' })
+    const pagePool = new RequestPool(config.parallelRequests, pauseController)
     const pageResults = await pagePool.execute(
       pageRequests,
       (req) => taxonRepo.getUniquePeptidesRange(req.taxonId, req.start, req.end, cleavageRegex, config.minLength, signal, req.parentId),
-      (done, total) => setStep('filter', { progress: done / total, detail: `Fetching unique peptides… ${fmtPercent(done, total)}` }),
+      (done, total) => setStep('peptide_coverage', { progress: done / total, detail: `Fetching unique peptides… ${fmtPercent(done, total)}` }),
     )
 
     // === Phase 4: Aggregate ===
@@ -522,18 +524,15 @@ export const usePipelineStore = defineStore('pipeline', () => {
     if (config.computeUniqueSharedPeptides && sharedPeptides.length > 0) {
       uniquePeptides.value = await computeGloballyUniquePeptides(sharedPeptides, descendants, taxonRepo, signal)
       uniqueSharedPeptidesComputed.value = true
-      setStep('filter', { status: 'done', progress: 1, detail: `${fmtN(uniquePeptides.value.length)} globally unique` })
+      setStep('peptide_coverage', { status: 'done', progress: 1, detail: `${fmtN(uniquePeptides.value.length)} globally unique` })
       addLog('info', `Globally unique peptides: ${fmtN(uniquePeptides.value.length)}`)
     } else {
-      setStep('filter', {
-        status: 'skipped',
-        detail: sharedPeptides.length === 0 ? 'Skipped — empty intersection' : 'Skipped — uniqueness filter disabled',
-      })
+      setStep('peptide_coverage', { status: 'done', progress: 1, detail: 'Per-taxon coverage computed' })
     }
   }
 
   async function run(taxa: TaxonSuggestion[]) {
-    if (status.value === 'running') return
+    if (ACTIVE_STATUSES.includes(status.value)) return
 
     _restoredFromHistory.value = false
     resetState()
@@ -542,6 +541,11 @@ export const usePipelineStore = defineStore('pipeline', () => {
     const inputTaxaIds = taxa.map((t) => t.id)
     abortController = new AbortController()
     const signal = abortController.signal
+    pauseController = new PauseController()
+    retryController = new RetryController(() => {
+      status.value = 'interrupted'
+      addLog('warning', 'Network request failed. Analysis paused — click Resume when your connection is back.')
+    })
     status.value = 'running'
 
     const taxonRepo = new TaxonRepository(new UnipeptService({
@@ -550,7 +554,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
       lcaBatchSize: config.lcaBatchSize,
       parallelRequests: config.parallelRequests,
       equateIL: config.equateIL,
-    }))
+    }, pauseController, retryController))
 
     const cleavageRegex = config.cleavageMethod === 'tryptic' ? '[KR](?!P)' : config.cleavageRegex
 
@@ -567,7 +571,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
       // ── Step 4: LCA lookup ──────────────────────────────────────────────────
       await lookupLcas(sharedPeptides, taxonRepo, signal);
 
-      // ── Step 5: Uniqueness filter ───────────────────────────────────────────
+      // ── Steps 5–6: Protein counts and peptide coverage ─────────────────────
       await computeUniqueAndPartialPeptides(validTaxa, sharedPeptides, descendants, descendantsPerTaxon, cleavageRegex, taxonRepo, signal);
 
       status.value = 'done'
@@ -588,11 +592,35 @@ export const usePipelineStore = defineStore('pipeline', () => {
       }
     } finally {
       abortController = null
+      pauseController = null
+      retryController = null
+    }
+  }
+
+  function pause() {
+    if (status.value !== 'running') return
+    pauseController?.pause()
+    status.value = 'paused'
+    addLog('info', 'Pipeline paused.')
+  }
+
+  function resume() {
+    if (status.value === 'paused') {
+      pauseController?.resume()
+      status.value = 'running'
+      addLog('info', 'Pipeline resumed.')
+    } else if (status.value === 'interrupted') {
+      status.value = 'running'
+      addLog('info', 'Retrying after connection loss…')
+      retryController?.resume()
     }
   }
 
   function cancel() {
     abortController?.abort()
+    // Release any parked workers/requests so they wake into the aborted signal and unwind.
+    pauseController?.resume()
+    retryController?.resume()
   }
 
   function reset() {
@@ -658,6 +686,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     getAllLogs,
     downloadLogs,
     run,
+    pause,
+    resume,
     cancel,
     reset,
     loadSaved,

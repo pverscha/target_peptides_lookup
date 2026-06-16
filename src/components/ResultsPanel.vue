@@ -105,6 +105,20 @@ function runUniqueSharedAnalysis() {
         Results will appear here once the pipeline completes.
       </div>
     </template>
+    <template v-else-if="pipeline.status === 'paused'">
+      <v-icon size="48" color="warning">mdi-pause-circle-outline</v-icon>
+      <div class="text-body-2 font-weight-medium mt-3">Analysis paused</div>
+      <div class="text-caption text-medium-emphasis mt-1">
+        Resume from the left panel to continue, or cancel to stop the run.
+      </div>
+    </template>
+    <template v-else-if="pipeline.status === 'interrupted'">
+      <v-icon size="48" color="error">mdi-wifi-off</v-icon>
+      <div class="text-body-2 font-weight-medium mt-3">Connection lost</div>
+      <div class="text-caption text-medium-emphasis mt-1">
+        A network request failed. Resume from the left panel once you're back online, or cancel.
+      </div>
+    </template>
     <template v-else-if="pipeline.status === 'error'">
       <v-icon size="48" color="error">mdi-alert-circle-outline</v-icon>
       <div class="text-body-2 font-weight-medium mt-3">Pipeline error</div>

@@ -1,5 +1,9 @@
 import type { UnipeptConfig, TaxonSuggestion } from '@/types'
 import {chunked, LINEAGE_ID_FIELDS} from '@/utils/peptides'
+import type { PauseController } from '@/utils/PauseController'
+import type { RetryController } from '@/utils/RetryController'
+import { isAbortError } from '@/utils/abort'
+import { RequestPool } from '@/utils/RequestPool'
 
 interface TaxonEntry {
   taxon_id: number
@@ -55,7 +59,11 @@ interface LcaEntry {
 export const UNIQUE_PEPTIDES_BATCH_SIZE = 500
 
 export class UnipeptService {
-  constructor(private readonly config: UnipeptConfig) {}
+  constructor(
+    private readonly config: UnipeptConfig,
+    private readonly pause?: PauseController,
+    private readonly retry?: RetryController,
+  ) {}
 
   async validateTaxa(
     taxaIds: number[],
@@ -68,6 +76,7 @@ export class UnipeptService {
     const chunks = chunked(taxaIds, this.config.batchSize)
 
     for (const [i, chunk] of chunks.entries()) {
+      await this.pause?.wait()
       const res = await this.fetchWithRetry(
         `${this.config.unipeptUrl}/api/v2/taxonomy.json`,
         { method: 'POST', body: this.buildParams(chunk) },
@@ -113,6 +122,7 @@ export class UnipeptService {
     const chunks = chunked(taxaIds, this.config.batchSize)
 
     for (const [i, chunk] of chunks.entries()) {
+      await this.pause?.wait()
       const params = this.buildParams(chunk, { descendants: 'true', 'descendants_ranks[]': 'species' })
       const res = await this.fetchWithRetry(
         `${this.config.unipeptUrl}/api/v2/taxonomy.json`,
@@ -148,9 +158,6 @@ export class UnipeptService {
     const lineageByPeptide = new Map<string, Set<number>>()
     const lcaByPeptide = new Map<string, { id: number; name: string; rank: string }>()
     const chunks = chunked(peptides, this.config.lcaBatchSize)
-    const total = chunks.length
-    let completedChunks = 0
-    let nextIdx = 0
 
     const processChunk = async (chunk: string[]): Promise<void> => {
       const params = new URLSearchParams()
@@ -180,20 +187,9 @@ export class UnipeptService {
           rank: entry.taxon_rank ?? '',
         })
       }
-
-      completedChunks++
-      onProgress?.(completedChunks, total)
     }
 
-    const worker = async (): Promise<void> => {
-      let idx: number
-      while ((idx = nextIdx++) < chunks.length) {
-        await processChunk(chunks[idx]!)
-      }
-    }
-
-    const workerCount = Math.min(this.config.parallelRequests, chunks.length)
-    await Promise.all(Array.from({ length: workerCount }, worker))
+    await new RequestPool(this.config.parallelRequests, this.pause).execute(chunks, processChunk, onProgress)
 
     return { lineageByPeptide, lcaByPeptide }
   }
@@ -223,9 +219,6 @@ export class UnipeptService {
     const taxaByPeptide = new Map<string, Set<number>>()
     const cutoffPeptides = new Set<string>()
     const chunks = chunked(peptides, this.config.lcaBatchSize)
-    const total = chunks.length
-    let completedChunks = 0
-    let nextIdx = 0
 
     const processChunk = async (chunk: string[]): Promise<void> => {
       const params = new URLSearchParams()
@@ -250,20 +243,9 @@ export class UnipeptService {
           cutoffPeptides.add(entry.peptide)
         }
       }
-
-      completedChunks++
-      onProgress?.(completedChunks, total)
     }
 
-    const worker = async (): Promise<void> => {
-      let idx: number
-      while ((idx = nextIdx++) < chunks.length) {
-        await processChunk(chunks[idx]!)
-      }
-    }
-
-    const workerCount = Math.min(this.config.parallelRequests, chunks.length)
-    await Promise.all(Array.from({ length: workerCount }, worker))
+    await new RequestPool(this.config.parallelRequests, this.pause).execute(chunks, processChunk, onProgress)
 
     return { taxaByPeptide, cutoffPeptides }
   }
@@ -389,17 +371,44 @@ export class UnipeptService {
     signal: AbortSignal,
     maxRetries = 3,
   ): Promise<Response> {
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const res = await fetch(url, { ...init, signal })
-      if (res.ok) return res
-      if (res.status === 429 || res.status >= 500) {
-        if (attempt === maxRetries) throw new Error(`HTTP ${res.status} from ${url}`)
-        await new Promise((resolve) => setTimeout(resolve, 200 * 2 ** attempt))
+    let httpAttempt = 0
+    while (true) {
+      let res: Response
+      try {
+        res = await fetch(url, { ...init, signal })
+      } catch (err) {
+        if (isAbortError(err)) throw err // user cancel — propagate
+        // Network error (offline, DNS, connection reset). Park until the user
+        // resumes, then retry the same request.
+        await this.parkOrThrow(err)
         continue
       }
+      if (res.ok) return res
+      if (res.status === 429 || res.status >= 500) {
+        // Silent bounded auto-retry with exponential backoff.
+        if (httpAttempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, 200 * 2 ** httpAttempt))
+          httpAttempt++
+          continue
+        }
+        // Budget exhausted — park, then retry with a fresh budget after the user resumes.
+        await this.parkOrThrow(new Error(`HTTP ${res.status} from ${url}`))
+        httpAttempt = 0
+        continue
+      }
+      // Non-retryable response (e.g. 4xx) — fail.
       throw new Error(`HTTP ${res.status} from ${url}`)
     }
-    throw new Error('fetchWithRetry: exhausted retries')
+  }
+
+  /**
+   * Parks the calling request until the user resumes (after which the caller
+   * retries). With no RetryController wired in, rethrows so non-pipeline callers
+   * keep their original fail-fast behavior.
+   */
+  private async parkOrThrow(err: unknown): Promise<void> {
+    if (!this.retry) throw err
+    await this.retry.waitForResume()
   }
 
   private async postJson<T>(url: string, body: unknown, signal: AbortSignal): Promise<T> {

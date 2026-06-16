@@ -22,18 +22,19 @@ const taxonInputRef = ref<InstanceType<typeof TaxonInput> | null>(null)
 const pipeline = usePipelineStore()
 const config = useConfigStore()
 
-const { isFinished } = usePipelineStatus()
+const { isActive, isFinished } = usePipelineStatus()
 
 const doneCount = computed(() => pipeline.steps.filter(s => s.status === 'done').length)
 const activeStep = computed(() => pipeline.steps.find(s => s.status === 'running'))
 
 const statusDotColor = computed(() => ({
-  idle: 'grey', running: 'primary', done: 'success', error: 'error', cancelled: 'grey',
+  idle: 'grey', running: 'primary', paused: 'warning', interrupted: 'error',
+  done: 'success', error: 'error', cancelled: 'grey',
 }[pipeline.status] ?? 'grey'))
 
 const statusLabel = computed(() => ({
-  idle: 'Ready', running: 'Running', done: 'Pipeline complete',
-  error: 'Pipeline error', cancelled: 'Cancelled',
+  idle: 'Ready', running: 'Running', paused: 'Paused', interrupted: 'Connection lost',
+  done: 'Pipeline complete', error: 'Pipeline error', cancelled: 'Cancelled',
 }[pipeline.status] ?? ''))
 
 async function copyLog() {
@@ -45,7 +46,7 @@ const selectedTaxaCount = computed(() => taxonInputRef.value?.selectedTaxa?.valu
 function onKeydown(e: KeyboardEvent) {
   if (e.key !== 'Enter') return
   if ((e.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return
-  if (pipeline.status !== 'running' && config.hasComputationEnabled) taxonInputRef.value?.runPipeline()
+  if (!isActive.value && config.hasComputationEnabled) taxonInputRef.value?.runPipeline()
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
@@ -118,7 +119,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         <v-divider class="mb-3" />
 
         <v-tooltip
-          v-if="pipeline.status !== 'running'"
+          v-if="!isActive"
           :text="!config.hasComputationEnabled ? 'Enable at least one computation option above before running.' : ''"
           :disabled="config.hasComputationEnabled"
           location="top"
@@ -138,19 +139,39 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
             </span>
           </template>
         </v-tooltip>
-        <v-btn
-          v-else
-          color="warning"
-          variant="flat"
-          prepend-icon="mdi-stop"
-          block
-          class="mb-2"
-          @click="pipeline.cancel()"
-        >
-          Cancel
-        </v-btn>
+        <div v-else class="d-flex ga-2 mb-2">
+          <v-btn
+            v-if="pipeline.status === 'running'"
+            color="info"
+            variant="flat"
+            prepend-icon="mdi-pause"
+            class="flex-grow-1"
+            @click="pipeline.pause()"
+          >
+            Pause
+          </v-btn>
+          <v-btn
+            v-else
+            color="success"
+            variant="flat"
+            prepend-icon="mdi-play"
+            class="flex-grow-1"
+            @click="pipeline.resume()"
+          >
+            Resume
+          </v-btn>
+          <v-btn
+            color="warning"
+            variant="flat"
+            prepend-icon="mdi-stop"
+            class="flex-grow-1"
+            @click="pipeline.cancel()"
+          >
+            Cancel
+          </v-btn>
+        </div>
 
-        <div v-if="pipeline.status !== 'running'" class="text-caption text-center text-medium-emphasis">
+        <div v-if="!isActive" class="text-caption text-center text-medium-emphasis">
           {{ selectedTaxaCount }} taxa selected · press ↵ to run
         </div>
       </div>
