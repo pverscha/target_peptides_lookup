@@ -82,41 +82,5 @@ const cleavageItems = [
         </template>
       </v-tooltip>
     </div>
-
-    <div class="text-caption text-uppercase text-medium-emphasis font-weight-medium mt-4 mb-1">
-      Computations
-    </div>
-
-    <div class="d-flex align-center mt-1">
-      <v-checkbox
-        v-model="config.computePerTaxonUnique"
-        label="Unique peptides per taxon"
-        color="primary"
-        density="compact"
-        hide-details
-        class="flex-shrink-0"
-      />
-      <v-tooltip text="For species/strain taxa, shows strict unique peptides. For higher-level taxa (genus, family, …), shows partially covering peptides with a coverage percentage: how many descendant species carry each peptide." location="right" max-width="280">
-        <template #activator="{ props: tp }">
-          <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="ml-1 text-medium-emphasis" style="cursor: default;" />
-        </template>
-      </v-tooltip>
-    </div>
-
-    <div class="d-flex align-center mt-1">
-      <v-checkbox
-        v-model="config.computeUniqueSharedPeptides"
-        label="Unique shared peptides"
-        color="primary"
-        density="compact"
-        hide-details
-        class="flex-shrink-0"
-      />
-      <v-tooltip text="Determines which shared peptides are globally unique to the selected taxon group (not found in any other organism in the Unipept database)." location="right" max-width="240">
-        <template #activator="{ props: tp }">
-          <v-icon v-bind="tp" icon="mdi-information-outline" size="14" class="ml-1 text-medium-emphasis" style="cursor: default;" />
-        </template>
-      </v-tooltip>
-    </div>
   </div>
 </template>

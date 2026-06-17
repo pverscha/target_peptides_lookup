@@ -53,8 +53,6 @@ export function useAnalysisHistory() {
             equateIL: config.equateIL,
             cleavageMethod: config.cleavageMethod,
             cleavageRegex: config.cleavageRegex,
-            computePerTaxonUnique: config.computePerTaxonUnique,
-            computeUniqueSharedPeptides: config.computeUniqueSharedPeptides,
           },
           taxonNames: pipeline.taxonNames,
           descendantIds: pipeline.descendantIds,
@@ -63,6 +61,7 @@ export function useAnalysisHistory() {
           uniquePeptides: pipeline.uniquePeptides,
           perTaxonUniquePeptides: pipeline.perTaxonUniquePeptides,
           perTaxonCoverage: pipeline.perTaxonCoverage,
+          perSpeciesUniquePeptides: pipeline.perSpeciesUniquePeptides,
           lcaByPeptide: pipeline.lcaByPeptide,
           logs: pipeline.getAllLogs().map((l) => ({ ...l, timestamp: l.timestamp.toISOString() })),
         }))

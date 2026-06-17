@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch, computed } from 'vue'
+import { ref, watch } from 'vue'
 import type { Config, AnalysisParams } from '@/types'
 
 const STORAGE_KEY = 'tpi_config'
@@ -13,8 +13,6 @@ const DEFAULTS: Config = {
   equateIL: true,
   cleavageMethod: 'tryptic',
   cleavageRegex: '(?<=[KR])(?!P)',
-  computePerTaxonUnique: true,
-  computeUniqueSharedPeptides: true,
 }
 
 function loadStored(): Config {
@@ -37,11 +35,9 @@ export const useConfigStore = defineStore('config', () => {
   const equateIL = ref(initial.equateIL)
   const cleavageMethod = ref(initial.cleavageMethod)
   const cleavageRegex = ref(initial.cleavageRegex)
-  const computePerTaxonUnique = ref(initial.computePerTaxonUnique)
-  const computeUniqueSharedPeptides = ref(initial.computeUniqueSharedPeptides)
 
   watch(
-    [unipeptUrl, batchSize, lcaBatchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex, computePerTaxonUnique, computeUniqueSharedPeptides],
+    [unipeptUrl, batchSize, lcaBatchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex],
     () => {
       const cfg: Config = {
         unipeptUrl: unipeptUrl.value,
@@ -52,8 +48,6 @@ export const useConfigStore = defineStore('config', () => {
         equateIL: equateIL.value,
         cleavageMethod: cleavageMethod.value,
         cleavageRegex: cleavageRegex.value,
-        computePerTaxonUnique: computePerTaxonUnique.value,
-        computeUniqueSharedPeptides: computeUniqueSharedPeptides.value,
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg))
     },
@@ -68,20 +62,14 @@ export const useConfigStore = defineStore('config', () => {
     equateIL.value = DEFAULTS.equateIL
     cleavageMethod.value = DEFAULTS.cleavageMethod
     cleavageRegex.value = DEFAULTS.cleavageRegex
-    computePerTaxonUnique.value = DEFAULTS.computePerTaxonUnique
-    computeUniqueSharedPeptides.value = DEFAULTS.computeUniqueSharedPeptides
   }
-
-  const hasComputationEnabled = computed(() => computePerTaxonUnique.value || computeUniqueSharedPeptides.value)
 
   function applyAnalysisParams(params: AnalysisParams) {
     minLength.value = params.minLength
     equateIL.value = params.equateIL
     cleavageMethod.value = params.cleavageMethod
     cleavageRegex.value = params.cleavageRegex
-    computePerTaxonUnique.value = params.computePerTaxonUnique
-    computeUniqueSharedPeptides.value = params.computeUniqueSharedPeptides
   }
 
-  return { unipeptUrl, batchSize, lcaBatchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex, computePerTaxonUnique, computeUniqueSharedPeptides, hasComputationEnabled, resetToDefaults, applyAnalysisParams }
+  return { unipeptUrl, batchSize, lcaBatchSize, parallelRequests, minLength, equateIL, cleavageMethod, cleavageRegex, resetToDefaults, applyAnalysisParams }
 })

@@ -9,7 +9,6 @@ import StepCard from './components/StepCard.vue'
 import ResultsPanel from './components/ResultsPanel.vue'
 import LogViewer from './components/LogViewer.vue'
 import { usePipelineStore } from '@/stores/pipeline'
-import { useConfigStore } from '@/stores/config'
 import { useAnalysisHistory } from '@/composables/useAnalysisHistory'
 import AnalysisHistoryPanel from './components/AnalysisHistoryPanel.vue'
 
@@ -20,7 +19,6 @@ const logDrawerOpen = ref(true)
 const showSteps = ref(false)
 const taxonInputRef = ref<InstanceType<typeof TaxonInput> | null>(null)
 const pipeline = usePipelineStore()
-const config = useConfigStore()
 
 const { isActive, isFinished } = usePipelineStatus()
 
@@ -41,12 +39,12 @@ async function copyLog() {
   await navigator.clipboard.writeText(formatLogLines(pipeline.getAllLogs()))
 }
 
-const selectedTaxaCount = computed(() => taxonInputRef.value?.selectedTaxa?.value?.length ?? 0)
+const selectedTaxaCount = computed(() => taxonInputRef.value?.selectedTaxa?.length ?? 0)
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key !== 'Enter') return
   if ((e.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return
-  if (!isActive.value && config.hasComputationEnabled) taxonInputRef.value?.runPipeline()
+  if (!isActive.value && selectedTaxaCount.value > 0) taxonInputRef.value?.runPipeline()
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
@@ -120,8 +118,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 
         <v-tooltip
           v-if="!isActive"
-          :text="!config.hasComputationEnabled ? 'Enable at least one computation option above before running.' : ''"
-          :disabled="config.hasComputationEnabled"
+          :text="selectedTaxaCount === 0 ? 'Select at least one taxon above before running.' : ''"
+          :disabled="selectedTaxaCount > 0"
           location="top"
         >
           <template #activator="{ props: tp }">
@@ -131,7 +129,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
                 variant="flat"
                 prepend-icon="mdi-play"
                 block
-                :disabled="!config.hasComputationEnabled"
+                :disabled="selectedTaxaCount === 0"
                 @click="taxonInputRef?.runPipeline()"
               >
                 Run Pipeline

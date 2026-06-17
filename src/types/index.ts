@@ -7,8 +7,6 @@ export interface Config {
   equateIL: boolean
   cleavageMethod: 'tryptic' | 'custom'
   cleavageRegex: string
-  computePerTaxonUnique: boolean
-  computeUniqueSharedPeptides: boolean
 }
 
 export interface UnipeptConfig {
@@ -50,8 +48,6 @@ export interface AnalysisParams {
   equateIL: boolean
   cleavageMethod: 'tryptic' | 'custom'
   cleavageRegex: string
-  computePerTaxonUnique: boolean
-  computeUniqueSharedPeptides: boolean
 }
 
 export interface AnalysisSnapshot {
@@ -73,6 +69,11 @@ export interface AnalysisSnapshot {
    *  peptide → list of descendant species IDs that contained this peptide in their
    *  unique_to_parent response. Absent for taxa shown as strict-unique (leaves). */
   perTaxonCoverage?: Record<number, Record<string, number[]>>
+  /** Strict globally-unique peptides for each descendant species, keyed by descendant species
+   *  ID. Populated for descendants of higher-level (non-species/strain) input taxa so the UI can
+   *  drill from a taxon into its species. Note: `taxonNames` also includes descendant species
+   *  names. */
+  perSpeciesUniquePeptides?: Record<number, string[]>
   lcaByPeptide: Record<string, { id: number; name: string; rank: string }>
   logs: Array<{ level: 'info' | 'warning' | 'error'; message: string; timestamp: string }>
 }

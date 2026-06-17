@@ -78,6 +78,11 @@ export const usePipelineStore = defineStore('pipeline', () => {
   // that peptide in their unique_to_parent response. The coverage percentage for a peptide is
   // coverage[taxId][peptide].length / descendantsByTaxon[taxId].length.
   const perTaxonCoverage = ref<Record<number, Record<string, number[]>>>({})
+  // Per-species strict globally-unique peptides, keyed by descendant species ID. Populated for
+  // every descendant species of a higher-level input taxon (the same peptides that would be
+  // shown if that species were itself a leaf input taxon). Used to drill from a higher-level
+  // taxon into its descendant species in the results panel.
+  const perSpeciesUniquePeptides = ref<Record<number, string[]>>({})
   // Taxonomic rank for each valid input taxon (id → rank string, e.g. "species", "genus").
   // Populated from inputTaxa and kept as persistent state so downstream steps and the UI
   // can classify taxa without rebuilding a temporary lookup on every run.
@@ -85,8 +90,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
   // LCA metadata for every peptide submitted to pept2lca, keyed by peptide sequence.
   const lcaByPeptide = ref<Record<string, { id: number; name: string; rank: string }>>({})
 
-  const perTaxonUniqueComputed = ref(false)
-  const uniqueSharedPeptidesComputed = ref(false)
+  // True once at least one input taxon has a non-empty per-taxon peptide list.
+  const perTaxonUniqueAvailable = computed(() => Object.values(perTaxonUniquePeptides.value).some((list) => list.length > 0))
 
   const _restoredFromHistory = ref(false)
 
@@ -121,10 +126,9 @@ export const usePipelineStore = defineStore('pipeline', () => {
     uniquePeptides.value = []
     perTaxonUniquePeptides.value = {}
     perTaxonCoverage.value = {}
+    perSpeciesUniquePeptides.value = {}
     taxonRanks.value = {}
     lcaByPeptide.value = {}
-    perTaxonUniqueComputed.value = false
-    uniqueSharedPeptidesComputed.value = false
     steps.value = makeSteps()
   }
 
@@ -202,6 +206,15 @@ export const usePipelineStore = defineStore('pipeline', () => {
 
     descendantIds.value = descendants;
     descendantsByTaxon.value = descendantsPerTaxon;
+
+    // Resolve display names for the descendant species so the results panel can label them
+    // instead of showing bare NCBI IDs. taxonNames already holds the input-taxon names; merge
+    // the descendant names into it (it is persisted with the analysis snapshot).
+    const descendantTaxa = await taxonRepo.fetchById(descendants, signal);
+    taxonNames.value = {
+      ...taxonNames.value,
+      ...Object.fromEntries(descendantTaxa.map((t) => [t.id, t.name])),
+    };
 
     setStep('descendants', { status: 'done', progress: 1, detail: `${fmtN(descendants.length)} species` });
     addLog('info', `Collected ${fmtN(descendants.length)} unique species-level descendants.`);
@@ -347,14 +360,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
   /**
    * Computes per-taxon unique and partially-covering peptides, then runs the
    * globally-unique shared peptide filter. Directly updates the pipeline store
-   * refs `perTaxonUniquePeptides`, `perTaxonCoverage`, `perTaxonUniqueComputed`,
-   * `uniquePeptides`, and `uniqueSharedPeptidesComputed`, and advances the
-   * `filter` step UI.
-   *
-   * **Early-exit.** When `sharedPeptides` is empty and
-   * `config.computePerTaxonUnique` is disabled, the step is marked skipped and
-   * `status` is set to `done`; no API calls are made and the function returns
-   * `undefined`.
+   * refs `perTaxonUniquePeptides`, `perTaxonCoverage`, and `uniquePeptides`, and
+   * advances the `filter` step UI.
    *
    * **Per-taxon logic.** Input taxa are classified by rank:
    *
@@ -376,13 +383,14 @@ export const usePipelineStore = defineStore('pipeline', () => {
    * `perTaxonCoverage` receives the raw coverage map. `perTaxonUniquePeptides`
    * is built per input taxon: leaf taxa get their sorted strict-unique list;
    * higher-level taxa get their partially-covering peptides sorted by descending
-   * coverage count (tiebroken by peptide sequence). `perTaxonUniqueComputed` is
-   * set to `true` when at least one input taxon has a non-empty peptide list.
+   * coverage count (tiebroken by peptide sequence). The derived
+   * `perTaxonUniqueComputed` flag is then `true` when at least one input taxon
+   * has a non-empty peptide list.
    *
    * **Globally-unique shared peptides.** After the per-taxon work, if
-   * `config.computeUniqueSharedPeptides` is enabled and `sharedPeptides` is
-   * non-empty, `computeGloballyUniquePeptides` is invoked and its result stored
-   * in `uniquePeptides`. Otherwise the filter step is marked skipped.
+   * `sharedPeptides` is non-empty, `computeGloballyUniquePeptides` is invoked
+   * and its result stored in `uniquePeptides`. Otherwise the filter step is
+   * marked done without computing globally-unique peptides.
    *
    * @param validTaxa - NCBI taxon IDs confirmed to exist in Unipept.
    * @param sharedPeptides - Global core peptidome (intersection across all descendants).
@@ -401,13 +409,6 @@ export const usePipelineStore = defineStore('pipeline', () => {
     taxonRepo: TaxonRepository,
     signal: AbortSignal
   ) {
-    if (sharedPeptides.length === 0 && !config.computePerTaxonUnique) {
-      setStep('protein_counts', { status: 'skipped', detail: 'Skipped — empty intersection' })
-      setStep('peptide_coverage', { status: 'skipped', detail: 'Skipped — empty intersection' })
-      status.value = 'done'
-      return
-    }
-
     const isLeafTaxon = (id: number): boolean => isLeafRank(taxonRanks.value[id])
 
     // === Phase 1: Count ===
@@ -501,11 +502,23 @@ export const usePipelineStore = defineStore('pipeline', () => {
     // Populate per-taxon store refs from the computed results.
     perTaxonCoverage.value = coverage;
 
+    // Retain the strict globally-unique peptides of every descendant species so the results
+    // panel can drill from a higher-level taxon into its species. (uniquePerSpecies also holds
+    // entries for leaf input taxa, but those are surfaced via perTaxonUniquePeptides below.)
+    const sortedUnique = (id: number) => [...(uniquePerSpecies.get(id) ?? [])].sort()
+
+    const perSpecies: Record<number, string[]> = {}
+    for (const job of taxonJobs) {
+      if (job.parentId === undefined) continue
+      perSpecies[job.taxonId] = sortedUnique(job.taxonId)
+    }
+    perSpeciesUniquePeptides.value = perSpecies;
+
     const perTaxon: Record<number, string[]> = {}
     for (const id of validTaxa) {
       if (isLeafRank(taxonRanks.value[id])) {
         // Leaf taxon (species/strain): strict-unique peptides, sorted for stable display.
-        perTaxon[id] = [...(uniquePerSpecies.get(id) ?? [])].sort()
+        perTaxon[id] = sortedUnique(id)
       } else {
         // Higher-level taxon: partially-covering peptides ordered by descendant
         // coverage (desc), with peptide sequence as tiebreaker.
@@ -518,12 +531,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     }
     perTaxonUniquePeptides.value = perTaxon;
 
-    // Mark the per-taxon section as computed so the UI accordion renders.
-    perTaxonUniqueComputed.value = Object.values(perTaxon).some((list) => list.length > 0);
-
-    if (config.computeUniqueSharedPeptides && sharedPeptides.length > 0) {
+    if (sharedPeptides.length > 0) {
       uniquePeptides.value = await computeGloballyUniquePeptides(sharedPeptides, descendants, taxonRepo, signal)
-      uniqueSharedPeptidesComputed.value = true
       setStep('peptide_coverage', { status: 'done', progress: 1, detail: `${fmtN(uniquePeptides.value.length)} globally unique` })
       addLog('info', `Globally unique peptides: ${fmtN(uniquePeptides.value.length)}`)
     } else {
@@ -645,14 +654,13 @@ export const usePipelineStore = defineStore('pipeline', () => {
     uniquePeptides.value = snapshot.uniquePeptides
     perTaxonUniquePeptides.value = snapshot.perTaxonUniquePeptides
     perTaxonCoverage.value = snapshot.perTaxonCoverage ?? {}
+    perSpeciesUniquePeptides.value = snapshot.perSpeciesUniquePeptides ?? {}
     taxonRanks.value = Object.fromEntries((snapshot.inputTaxa ?? []).map((t) => [t.id, t.rank]))
     lcaByPeptide.value = snapshot.lcaByPeptide
     _allLogs = snapshot.logs.map((l) => ({ ...l, timestamp: new Date(l.timestamp) }))
     allLogsCount.value = _allLogs.length
     logs.value = _allLogs.slice(-LOG_UI_LIMIT)
     steps.value = makeSteps().map((s) => ({ ...s, status: 'done', progress: 1 }))
-    perTaxonUniqueComputed.value = true
-    uniqueSharedPeptidesComputed.value = true
     status.value = 'done'
   }
 
@@ -678,10 +686,10 @@ export const usePipelineStore = defineStore('pipeline', () => {
     uniquePeptides: readonly(uniquePeptides),
     perTaxonUniquePeptides: readonly(perTaxonUniquePeptides),
     perTaxonCoverage: readonly(perTaxonCoverage),
+    perSpeciesUniquePeptides: readonly(perSpeciesUniquePeptides),
     taxonRanks: readonly(taxonRanks),
     lcaByPeptide: readonly(lcaByPeptide),
-    perTaxonUniqueComputed: readonly(perTaxonUniqueComputed),
-    uniqueSharedPeptidesComputed: readonly(uniqueSharedPeptidesComputed),
+    perTaxonUniqueAvailable,
     isRestoredSnapshot: readonly(computed(() => _restoredFromHistory.value)),
     getAllLogs,
     downloadLogs,
